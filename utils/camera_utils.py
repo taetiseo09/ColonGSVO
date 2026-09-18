@@ -78,8 +78,8 @@ def camera_to_JSON(id, camera: Camera):
     Rt[3, 3] = 1.0
 
     W2C = np.linalg.inv(Rt)
-    pos = W2C[:3, 3]
-    rot = W2C[:3, :3]
+    pos = W2C[:3, 3] #t
+    rot = W2C[:3, :3] #r
     serializable_array_2d = [x.tolist() for x in rot]
     camera_entry = {
         'id': id,

@@ -74,6 +74,7 @@ class CFGaussianModel:
         self.rotate_seq = False
         self.seq_idx = 0
         self.view_dependent = view_dependent
+        self.confidence = torch.empty(0)
         self.setup_functions()
 
     def capture(self):
@@ -208,7 +209,7 @@ class CFGaussianModel:
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
-
+        self.confidence = torch.ones_like(opacities, device="cuda")
         self.max_radii2D = torch.zeros((self._xyz.shape[0]), device="cuda")
 
     def fix_position(self):
@@ -573,6 +574,7 @@ class CFGaussianModel:
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
+        self.confidence = self.confidence[valid_points_mask]
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -625,6 +627,7 @@ class CFGaussianModel:
             (self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        self.confidence = torch.cat([self.confidence, torch.ones(new_opacities.shape, device="cuda")], 0)
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
@@ -726,7 +729,7 @@ class CF3DGS_Render:
         self.sh_degree = sh_degree
         self.white_background = white_background
         self.radius = radius
-        self.view_dependent = view_dependent
+        self.view_dependent = view_dependent #true
 
         self.gaussians = CFGaussianModel(sh_degree,
                                          view_dependent=self.view_dependent)
@@ -784,7 +787,7 @@ class CF3DGS_Render:
         convert_SHs_python=False,
     ):
         """
-        Render the scene. 
+        Render the scene.
 
         Background tensor (bg_color) must be on GPU!
         """
@@ -807,7 +810,9 @@ class CF3DGS_Render:
         # Set up rasterization configuration
         tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
         tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+        use_confidence = False
 
+        confidence = self.gaussians.confidence if use_confidence else torch.ones_like(self.gaussians._opacity)
         raster_settings = GaussianRasterizationSettings(
             image_height=int(viewpoint_camera.image_height),
             image_width=int(viewpoint_camera.image_width),
@@ -820,7 +825,7 @@ class CF3DGS_Render:
             sh_degree=self.gaussians.active_sh_degree,
             campos=viewpoint_camera.camera_center,
             prefiltered=False,
-            debug=False,
+            debug=False
         )
 
         rasterizer = GaussianRasterizer(raster_settings=raster_settings)

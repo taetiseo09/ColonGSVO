@@ -100,16 +100,19 @@ class Loss(nn.Module):
 
         rgb_gt = rgb_gt.cuda()
 
-        lambda_dssim = self.cfg.lambda_dssim
+        lambda_dssim = self.cfg.lambda_dssim  # λ: L1 vs SSIM 的比例
+        lambda_rgb = self.cfg.lambda_rgb      # λ1: RGB loss 的整体权重
         lambda_depth = self.cfg.lambda_depth
 
-        # rgb_full_loss = self.get_rgb_full_loss(rgb_pred, rgb_gt, rgb_loss_type)
-        rgb_full_loss = (1 - lambda_dssim) * l1_loss(rgb_pred, rgb_gt)
+        # L_rgb = (1-λ) * L1 + λ * SSIM
+        l1_component = l1_loss(rgb_pred, rgb_gt)
         if lambda_dssim != 0.0:
-            # dssim_loss = compute_ssim_loss(rgb_pred, rgb_gt)
-            # pdb.set_trace()
-            # dssim_loss = 1 - ssim(rgb_pred, rgb_gt)
             dssim_loss = 1 - self.ssim_loss(rgb_pred, rgb_gt)
+        else:
+            dssim_loss = torch.tensor(0.0).cuda().float()
+
+        # 组合 RGB loss
+        rgb_combined_loss = (1 - lambda_dssim) * l1_component + lambda_dssim * dssim_loss
 
         if lambda_depth != 0.0 and depth_pred is not None and depth_gt is not None:
             depth_gt = depth_gt.cuda()
@@ -120,17 +123,19 @@ class Loss(nn.Module):
         else:
             depth_loss = torch.tensor(0.0).cuda().float()
 
-        loss = rgb_full_loss + lambda_dssim * dssim_loss +\
-            lambda_depth * depth_loss
+        loss = lambda_rgb * rgb_combined_loss + lambda_depth * depth_loss
 
         if torch.isnan(loss):
-            breakpoint()
+            raise FloatingPointError(
+                "NaN loss detected. Check input images, predicted depth, and loss weights."
+            )
 
         return_dict = {
             'loss': loss,
-            'loss_rgb': rgb_full_loss,
+            'loss_l1': l1_component,
             'loss_dssim': dssim_loss,
             'loss_depth': depth_loss,
+            'loss_rgb_combined': rgb_combined_loss,  # 未加权的 RGB loss
         }
 
         return return_dict

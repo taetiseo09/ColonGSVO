@@ -3,7 +3,7 @@
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
 #
-# This software is free for non-commercial, research and evaluation use 
+# This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
@@ -22,7 +22,7 @@ class Scene:
 
     gaussians : GaussianModel
 
-    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0]):
+    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0], pipe=None):
         """b
         :param path: Path to colmap scene main folder.
         """
@@ -39,9 +39,23 @@ class Scene:
 
         self.train_cameras = {}
         self.test_cameras = {}
+        print('source_path',args.source_path)
 
-        if os.path.exists(os.path.join(args.source_path, "sparse")):
-            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
+        # 获取 train_test_split 参数，如果 pipe 为 None 则使用默认值
+        train_test_split = pipe.train_test_split if pipe is not None else 8
+        print('////train_test_split rate:',train_test_split)
+
+        if os.path.exists(os.path.join(args.source_path, "left")):
+            scene_info = sceneLoadTypeCallbacks["Custom"](args.source_path, args.images, args.eval, train_test_split, args.start_cam, args.end_cam)
+        elif os.path.exists(os.path.join(args.source_path, "monodep")):
+            print("Found SCARED dataset structure (input/, poses/, monodep/)")
+            scene_info = sceneLoadTypeCallbacks["Scared"](args.source_path, args.images, args.eval, train_test_split, args.start_cam, args.end_cam)
+        elif os.path.exists(os.path.join(args.source_path, "pose.txt")):
+            scene_info = sceneLoadTypeCallbacks["Endoscope"](args.source_path, args.images, args.eval, train_test_split, args.start_cam, args.end_cam)
+        elif os.path.exists(os.path.join(args.source_path, "Calibration")):
+            scene_info = sceneLoadTypeCallbacks["UC"](args.source_path, args.images, args.eval, train_test_split, args.start_cam, args.end_cam)
+        elif os.path.exists(os.path.join(args.source_path, "sparse")):
+            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, train_test_split)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)
@@ -49,8 +63,8 @@ class Scene:
             assert False, "Could not recognize scene type!"
 
         if not self.loaded_iter:
-            with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
-                dest_file.write(src_file.read())
+            # with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
+            #     dest_file.write(src_file.read())
             json_cams = []
             camlist = []
             if scene_info.test_cameras:
@@ -58,7 +72,7 @@ class Scene:
             if scene_info.train_cameras:
                 camlist.extend(scene_info.train_cameras)
             for id, cam in enumerate(camlist):
-                json_cams.append(camera_to_JSON(id, cam))
+                json_cams.append(camera_to_JSON(id, cam)) # Rts 转化，W2C
             with open(os.path.join(self.model_path, "cameras.json"), 'w') as file:
                 json.dump(json_cams, file)
 
@@ -80,7 +94,8 @@ class Scene:
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"))
         else:
-            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
+            print('initialization from none pcd')
+            # self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))

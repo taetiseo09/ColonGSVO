@@ -9,7 +9,7 @@
 import os
 import matplotlib
 import matplotlib.pyplot as plt
-from matplotlib import tight_layout
+import matplotlib.pyplot as plt
 import copy
 from evo.core.trajectory import PosePath3D, PoseTrajectory3D
 from evo.main_ape import ape
@@ -183,7 +183,8 @@ def convert3x4_4x4(input):
 plt.rc('legend', fontsize=20)  # using a named size
 
 
-def plot_pose(ref_poses, est_poses, output_path, vid=False):
+def plot_pose(ref_poses, est_poses, output_path, vid=False,fig_size=(10, 8),
+              set_limits=True, pose_name = 'pose_vis.png', view_angle=None, view_ele = None):
     ref_poses = [pose for pose in ref_poses]
     if isinstance(est_poses, dict):
         est_poses = [pose for k, pose in est_poses.items()]
@@ -194,6 +195,28 @@ def plot_pose(ref_poses, est_poses, output_path, vid=False):
     traj_est_aligned = copy.deepcopy(traj_est)
     traj_est_aligned.align(traj_ref, correct_scale=True,
                            correct_only_scale=False)
+
+    def compute_traj_bounds(traj_list):
+        all_positions = np.vstack([traj.positions_xyz for traj in traj_list])
+        min_vals = np.min(all_positions, axis=0)
+        max_vals = np.max(all_positions, axis=0)
+        return min_vals, max_vals
+
+    # 计算轨迹的边界
+    min_pos, max_pos = compute_traj_bounds([traj_ref, traj_est_aligned])
+
+    # 添加边界缓冲
+    # range_vals = max_pos - min_pos
+    # buffer = range_vals * 0.1  # 10% 缓冲区
+    # min_pos -= buffer
+    # max_pos += buffer
+
+    # 确保XYZ轴具有相同的比例尺
+    # center = (min_pos + max_pos) / 2
+    # max_range = np.max(max_pos - min_pos) / 2
+    # min_bounds = center - max_range
+    # max_bounds = center + max_range
+
     if vid:
         for p_idx in range(len(ref_poses)):
             fig = plt.figure()
@@ -231,27 +254,168 @@ def plot_pose(ref_poses, est_poses, output_path, vid=False):
 
     # else:
 
-    fig = plt.figure()
+    # 主静态轨迹图
+    fig = plt.figure(figsize=fig_size)
     traj_by_label = {
-        # "estimate (not aligned)": traj_est,
         "Ours (aligned)": traj_est_aligned,
         "Ground-truth": traj_ref
     }
     plot_mode = plot.PlotMode.xyz
-    # ax = plot.prepare_axis(fig, plot_mode, 111)
     ax = fig.add_subplot(111, projection="3d")
+
+    # 隐藏刻度
     ax.xaxis.set_tick_params(labelbottom=False)
     ax.yaxis.set_tick_params(labelleft=False)
     ax.zaxis.set_tick_params(labelleft=False)
+
+    # 设置坐标轴范围
+    # if set_limits:
+    #     ax.set_xlim(min_bounds[0], max_bounds[0])
+    #     ax.set_ylim(min_bounds[1], max_bounds[1])
+    #     ax.set_zlim(min_bounds[2], max_bounds[2])
+    #     ax.set_box_aspect((1, 1, 1))  # 确保XYZ轴具有相同的比例尺
+
+    # 添加轴标签（可选）
+    ax.set_xlabel('X', labelpad=-10)
+    ax.set_ylabel('Y', labelpad=-10)
+    ax.set_zlabel('Z', labelpad=-10)
+
     colors = ['r', 'b']
     styles = ['-', '--']
 
     for idx, (label, traj) in enumerate(traj_by_label.items()):
         plot.traj(ax, plot_mode, traj,
                   styles[idx], colors[idx], label)
-        # break
-    # plot.trajectories(fig, traj_by_label, plot.PlotMode.xyz)
-    ax.view_init(elev=10., azim=45)
+
+    # 设置更好的视角
+    elev = view_ele if view_ele is not None else 15.
+    azim = view_angle if view_angle is not None else 45.
+    ax.view_init(elev=elev, azim=azim)
+    ax.legend(loc='upper right', fontsize=12)
     plt.tight_layout()
-    pose_vis_path = os.path.join(os.path.dirname(output_path), 'pose_vis.png')
-    fig.savefig(pose_vis_path)
+
+
+    pose_vis_path = os.path.join(os.path.dirname(output_path), pose_name)
+    fig.savefig(pose_vis_path, dpi=300)  # 增加DPI获得更高分辨率
+    plt.close(fig)
+    # return pose_vis_path  # 返回保存的图像路径
+def plot_fixed_gt_pose(gt_poses, pred_poses, save_dir, fig_size=(12, 10),
+                        view_angle=30, view_ele=30, pose_name="pose_fixed_gt.png"):
+    """
+    绘制轨迹对比图，保持GT轨迹固定，仅对齐预测轨迹
+
+    Args:
+        gt_poses: 真实轨迹，形状为[N, 4, 4]
+        pred_poses: 对齐后的预测轨迹，形状为[N, 4, 4]
+        save_dir: 保存目录
+        fig_size: 图像大小
+        view_angle: 观察角度（水平方向）
+        view_ele: 观察仰角
+        pose_name: 保存的文件名
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    fig = plt.figure(figsize=fig_size)
+    ax = fig.add_subplot(111, projection='3d')
+
+    # 提取位置信息
+    gt_positions = gt_poses[:, :3, 3]
+    pred_positions = pred_poses[:, :3, 3]
+
+    # 绘制GT轨迹（蓝色）
+    ax.plot(gt_positions[:, 0], gt_positions[:, 1], gt_positions[:, 2], 'b-', linewidth=1, label='Ground Truth')
+    ax.scatter(gt_positions[0, 0], gt_positions[0, 1], gt_positions[0, 2], c='b', marker='o', s=50)  # 起点
+
+    # 绘制预测轨迹（红色）
+    ax.plot(pred_positions[:, 0], pred_positions[:, 1], pred_positions[:, 2], 'r-', linewidth=1, label='Predicted')
+    ax.scatter(pred_positions[0, 0], pred_positions[0, 1], pred_positions[0, 2], c='r', marker='o', s=50)  # 起点
+
+    # 绘制相机位姿（仅绘制每10帧一个）
+    camera_size = 0.05  # 相机可视化大小
+    for i in range(0, len(gt_poses), 10):
+        # 绘制GT相机位姿
+        R_gt = gt_poses[i, :3, :3]
+        t_gt = gt_poses[i, :3, 3]
+        plot_camera(ax, R_gt, t_gt, camera_size, 'b')
+
+        # 绘制预测相机位姿
+        R_pred = pred_poses[i, :3, :3]
+        t_pred = pred_poses[i, :3, 3]
+        plot_camera(ax, R_pred, t_pred, camera_size, 'r')
+
+    # 设置图表属性
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.legend()
+
+    # 设置视角
+    ax.view_init(elev=view_ele, azim=view_angle)
+
+    # 设置相等的坐标轴比例
+    max_range = np.max([
+        np.max(np.abs(gt_positions.max(axis=0) - gt_positions.min(axis=0))),
+        np.max(np.abs(pred_positions.max(axis=0) - pred_positions.min(axis=0)))
+    ])
+
+    # 获取轨迹中心点
+    mid_gt = (gt_positions.max(axis=0) + gt_positions.min(axis=0)) / 2
+
+    # 设置轴范围以保持GT轨迹居中
+    ax.set_xlim(mid_gt[0] - max_range / 2, mid_gt[0] + max_range / 2)
+    ax.set_ylim(mid_gt[1] - max_range / 2, mid_gt[1] + max_range / 2)
+    ax.set_zlim(mid_gt[2] - max_range / 2, mid_gt[2] + max_range / 2)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, pose_name), dpi=150)
+    plt.close()
+
+def plot_camera(ax, R, t, size, color):
+    """
+    在3D图上绘制简化的相机模型
+    """
+    # 相机坐标系
+    origin = t
+    x_axis = origin + size * R[:, 0]
+    y_axis = origin + size * R[:, 1]
+    z_axis = origin + size * R[:, 2]
+
+    # 绘制坐标轴
+    ax.plot([origin[0], x_axis[0]], [origin[1], x_axis[1]], [origin[2], x_axis[2]], color=color, linewidth=0.5)
+    ax.plot([origin[0], y_axis[0]], [origin[1], y_axis[1]], [origin[2], y_axis[2]], color=color, linewidth=0.5)
+    ax.plot([origin[0], z_axis[0]], [origin[1], z_axis[1]], [origin[2], z_axis[2]], color=color, linewidth=0.5)
+
+def umeyama_alignment(pred, gt):
+    """
+    计算从pred到gt的相似变换（缩放、旋转和平移）
+    返回缩放因子s，旋转矩阵R和平移向量t
+    """
+    # 确保输入是numpy数组
+    pred = np.asarray(pred)
+    gt = np.asarray(gt)
+
+    # 计算质心
+    pred_mean = np.mean(pred, axis=0)
+    gt_mean = np.mean(gt, axis=0)
+
+    # 去中心化
+    pred_demean = pred - pred_mean
+    gt_demean = gt - gt_mean
+
+    # 计算缩放因子
+    pred_var = np.mean(np.sum(pred_demean**2, axis=1))
+    s = 1.0 if pred_var == 0 else np.sqrt(np.mean(np.sum(gt_demean**2, axis=1)) / pred_var)
+
+    # 计算旋转矩阵
+    U, _, Vt = np.linalg.svd(gt_demean.T @ pred_demean)
+    R = U @ Vt
+
+    # 确保旋转矩阵是正交的
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = U @ Vt
+
+    # 计算平移向量
+    t = gt_mean - s * (R @ pred_mean)
+
+    return s, R, t

@@ -103,3 +103,87 @@ def align_scale_c2b_use_a2b(traj_a, traj_b, traj_c=None):
         traj_c = convert3x4_4x4(traj_c)  # (N, 4, 4)
 
     return traj_c, scale_a2b  # (N, 4, 4)
+
+
+def align(model, data):
+    """Align two trajectories using the method of Horn (closed-form).
+
+    Args:
+        model -- first trajectory (3xn)
+        data -- second trajectory (3xn)
+
+    Returns:
+        rot -- rotation matrix (3x3)
+        trans -- translation vector (3x1)
+        trans_error -- translational error per point (1xn)
+    """
+
+    np.set_printoptions(precision=3, suppress=True)
+    model_zerocentered = model - model.mean(1).reshape((3,-1))
+    data_zerocentered = data - data.mean(1).reshape((3,-1))
+
+    W = np.zeros((3, 3))
+    for column in range(model.shape[1]):
+        W += np.outer(model_zerocentered[:,
+                         column], data_zerocentered[:, column])
+    U, d, Vh = np.linalg.linalg.svd(W.transpose())
+    S = np.matrix(np.identity(3))
+    if (np.linalg.det(U) * np.linalg.det(Vh) < 0):
+        S[2, 2] = -1
+    rot = U*S*Vh
+    trans = data.mean(1).reshape((3,-1)) - rot * model.mean(1).reshape((3,-1))
+
+    model_aligned = rot * model + trans
+    alignment_error = model_aligned - data
+
+    trans_error = np.sqrt(np.sum(np.multiply(
+        alignment_error, alignment_error), 0)).A[0]
+
+    return model_aligned, trans_error
+
+
+def evaluate_ate(gt_traj, est_traj):
+    """
+    Input :
+        gt_traj: list of 4x4 matrices
+        est_traj: list of 4x4 matrices
+        len(gt_traj) == len(est_traj)
+    """
+    if torch.is_tensor(gt_traj):
+        gt_traj = gt_traj.detach().cpu().numpy()
+    if torch.is_tensor(est_traj):
+        est_traj = est_traj.detach().cpu().numpy()
+
+    # 确保列表中的每个元素都是numpy数组
+    gt_traj_np = []
+    est_traj_np = []
+
+    for idx in range(len(gt_traj)):
+        gt_pose = gt_traj[idx]
+        est_pose = est_traj[idx]
+
+        # 如果是张量，转换为numpy
+        if torch.is_tensor(gt_pose):
+            gt_pose = gt_pose.detach().cpu().numpy()
+        if torch.is_tensor(est_pose):
+            est_pose = est_pose.detach().cpu().numpy()
+
+        # 确保是4x4矩阵
+        if gt_pose.shape == (3, 4):
+            gt_pose = convert3x4_4x4(gt_pose)
+        if est_pose.shape == (3, 4):
+            est_pose = convert3x4_4x4(est_pose)
+
+        gt_traj_np.append(gt_pose)
+        est_traj_np.append(est_pose)
+    gt_traj_pts = [gt_traj[idx][:3,3] for idx in range(len(gt_traj))]
+    est_traj_pts = [est_traj[idx][:3,3] for idx in range(len(est_traj))]
+
+    gt_traj_pts  = np.array(gt_traj_pts).T
+    est_traj_pts = np.array(est_traj_pts).T
+
+    gt_aligned, trans_error = align(gt_traj_pts, est_traj_pts)
+
+    avg_trans_error = trans_error.mean()
+
+    return avg_trans_error, gt_aligned, est_traj_pts

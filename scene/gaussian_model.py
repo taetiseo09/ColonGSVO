@@ -9,7 +9,7 @@
 
 
 import torch
-from lietorch import SO3, SE3, Sim3
+# from lietorch import SO3, SE3, Sim3
 import numpy as np
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
 from torch import nn
@@ -156,9 +156,12 @@ class GaussianModel:
                     R = self.R[pid-1]
                 try:
                     xyz = (R @ xyz.t()).t() + self.T[pid-1]
-
-                except:
-                    pdb.set_trace()
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        f"Failed to transform Gaussian partition {pid}; "
+                        f"R={tuple(R.shape)}, xyz={tuple(xyz.shape)}, "
+                        f"T={tuple(self.T[pid-1].shape)}"
+                    ) from exc
             return xyz
         elif self.rotate_seq:
             if self.rot_type == '6d':
@@ -239,7 +242,7 @@ class GaussianModel:
     def create_from_pcd(self, pcd: BasicPointCloud, spatial_lr_scale: float):
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
-        if self.view_dependent:
+        if self.view_dependent: #false
             fused_color = RGB2SH(torch.tensor(
                 np.asarray(pcd.colors)).float().cuda())
         else:
@@ -888,7 +891,7 @@ class GS_Render:
         convert_SHs_python=False,
     ):
         """
-        Render the scene. 
+        Render the scene.
 
         Background tensor (bg_color) must be on GPU!
         """

@@ -7,7 +7,7 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import pdb
-from kornia.geometry.depth import depth_to_3d, depth_to_normals
+from kornia.geometry.depth import depth_to_3d, depth_to_normals, depth_to_3d_v2
 from pytorch3d.utils import opencv_from_cameras_projection
 from pytorch3d.renderer import PerspectiveCameras
 import pytorch3d
@@ -36,7 +36,7 @@ import json
 import gzip
 import torch
 import torch.nn.functional as F
-torch.hub.help("intel-isl/MiDaS", "DPT_BEiT_L_384", force_reload=True)
+from matplotlib.colors import LinearSegmentedColormap
 
 
 class GaussianTrainer(object):
@@ -51,12 +51,24 @@ class GaussianTrainer(object):
         self.data_root = data_root.split(self.category)[0]
         self.data_type = model_cfg.data_type
         self.depth_model_type = model_cfg.depth_model_type
+        self.inverse_depth = model_cfg.inverse_depth
+        self.inverse_depth_interval = model_cfg.inverse_depth_interval
+        self.visualize_depth = model_cfg.visualize_depth
+        self.depth_vis_dir = model_cfg.depth_vis_dir
+        self.depth_scale = model_cfg.depth_scale
+        self.use_local_depth_scale = getattr(model_cfg, "use_local_depth_scale", False)
+        self.local_depth_scale = getattr(model_cfg, "local_depth_scale", 1.0)
+        self.local_depth_scale_size = getattr(model_cfg, "local_depth_scale_size", 100)
         self.rgb_images = OrderedDict()
         self.render_depth = OrderedDict()
         self.render_image = OrderedDict()
         self.mono_depth = OrderedDict()
         self.setup_dataset()
         self.setup_depth_predictor()
+        print(f"[cfg] use_local_depth_scale={self.use_local_depth_scale}, "
+              f"local_depth_scale={self.local_depth_scale}, "
+              f"local_depth_scale_size={self.local_depth_scale_size}, "
+              f"depth_scale={self.depth_scale}")
 
     def load_camera(self, data, scale=1.0):
         """
@@ -123,11 +135,16 @@ class GaussianTrainer(object):
             self.depth_model = zoe
         elif self.depth_model_type == "depth_anything":
             from torchvision.transforms import Compose
-            from submodules.DepthAnything.depth_anything.dpt import DepthAnything
-            from submodules.DepthAnything.depth_anything.util.transform import Resize, NormalizeImage, PrepareForNet
-            encoder = 'vits' # can also be 'vitb' or 'vitl'
+            try:
+                from depth_anything.dpt import DepthAnything
+                from depth_anything.util.transform import Resize, NormalizeImage, PrepareForNet
+            except ImportError as exc:
+                raise RuntimeError(
+                    "depth_model_type=depth_anything requires the optional "
+                    "Depth-Anything package. The C3VD demo uses --depth_model_type dpt."
+                ) from exc
+            encoder = 'vitl' # can also be 'vitb' or 'vitl'
             depth_anything = DepthAnything.from_pretrained('LiheYoung/depth_anything_{:}14'.format(encoder)).eval()
-            # depth_anything = DepthAnything.from_pretrained('checkpoints/depth_anything_metric_depth_outdoor', local_files_only=True).eval()
 
             self.depth_transforms = Compose([
                 Resize(
@@ -152,7 +169,16 @@ class GaussianTrainer(object):
             self.depth_model = midas
         self.mono_depth = OrderedDict()
 
-    def predict_depth(self, img):
+        # 创建深度可视化输出目录
+        if self.visualize_depth:
+            self.depth_vis_output_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                self.depth_vis_dir
+            )
+            os.makedirs(self.depth_vis_output_dir, exist_ok=True)
+            print(f"深度可视化将保存到: {self.depth_vis_output_dir}")
+
+    def predict_depth(self, img, img_idx=None):
         if self.depth_model_type == "zoe":
             depth = self.depth_model.infer_pil(Image.fromarray(img.astype(np.uint8)),
                                                output_type='tensor')
@@ -168,7 +194,7 @@ class GaussianTrainer(object):
                 align_corners=False,
             ).squeeze().detach()
             # depth = (depth - depth.min()) / (depth.max() - depth.min()) * 255.0
-            
+
             # depth = depth.cpu().numpy().astype(np.uint8)
             # depth_color = cv2.applyColorMap(depth, cv2.COLORMAP_INFERNO)
             # pdb.set_trace()
@@ -195,6 +221,53 @@ class GaussianTrainer(object):
             depth = scale * prediction + shift
             depth[depth < 1e-8] = 1e-8
             depth = 1.0 / depth
+
+        # 深度取反逻辑
+        should_inverse = False
+        if self.inverse_depth:
+            # 如果设置了全局取反
+            should_inverse = True
+        elif self.inverse_depth_interval > 0 and img_idx is not None:
+            # 如果设置了间隔取反，并且当前是第k的倍数帧
+            if (img_idx % self.inverse_depth_interval) == 0:
+                should_inverse = True
+
+        if should_inverse:
+            # 倒数取反：近变远，远变近
+            depth = 1.0 / (depth + 1e-8)
+
+        # 深度缩放逻辑：将深度乘以scale factor
+        if self.depth_scale != 1.0:
+            depth = depth * self.depth_scale
+
+        if self.use_local_depth_scale and (self.local_depth_scale is not None) and (self.local_depth_scale != 1.0):
+            # depth is torch.Tensor [H, W] typically
+            if torch.is_tensor(depth) and depth.ndim == 2:
+                h, w = depth.shape
+                s = int(self.local_depth_scale_size)
+                s = max(1, min(s, h, w))
+                depth[h - s : h, w - s : w] = depth[h - s : h, w - s : w] * float(self.local_depth_scale)
+
+        # 深度可视化保存
+        if self.visualize_depth and img_idx is not None:
+            try:
+                # 对于可视化，将深度除以scale factor进行归一化
+                depth_np = depth.cpu().numpy() if torch.is_tensor(depth) else depth
+                depth_vis = depth_np / self.depth_scale if self.depth_scale != 1.0 else depth_np
+                colored_depth = colorize(depth_vis, cmap='plasma')
+
+                # 保存可视化结果
+                vis_filename = os.path.join(self.depth_vis_output_dir, f"depth_{img_idx:04d}_vis.png")
+                Image.fromarray(colored_depth).convert("RGB").save(vis_filename)
+
+                # 可选：同时保存原始RGB图像用于对比
+                if hasattr(self, 'rgb_images') and img_idx in self.rgb_images:
+                    rgb_img = self.rgb_images[img_idx]
+                    rgb_filename = os.path.join(self.depth_vis_output_dir, f"rgb_{img_idx:04d}.png")
+                    rgb_img.save(rgb_filename)
+            except Exception as e:
+                print(f"警告: 保存深度可视化失败 (frame {img_idx}): {str(e)}")
+
         return depth
 
     def setup_dataset(self):
@@ -276,7 +349,7 @@ class GaussianTrainer(object):
             if min(width, height) > 1000:
                 width = width // 2
                 height = height // 2
-            
+
             intr_mat[:2, :] /= 2
             self.intrinsic = intr_mat
 
@@ -295,7 +368,7 @@ class GaussianTrainer(object):
             model_cfg = copy(self.model_cfg)
             model_cfg.model_path = ""
             gaussians = GaussianModel(3)
-            scene = Scene(model_cfg, gaussians, shuffle=False)
+            scene = Scene(model_cfg, gaussians, shuffle=False, pipe=self.pipe_cfg)
             test_views = scene.getTestCameras().copy()
             train_views = scene.getTrainCameras().copy()
             all_views = train_views + test_views
@@ -305,14 +378,14 @@ class GaussianTrainer(object):
             ids = np.arange(len(all_views))
             self.i_test = ids[int(sample_rate/2)::sample_rate]
             self.i_train = np.array([i for i in ids if i not in self.i_test])
-            if "eval" in self.model_cfg.mode:
+            if "eval" in self.model_cfg.mode: #eval_post, eval_nvs
                 # if self.model_cfg.eval_pose or self.model_cfg.eval_nvs:
                 # viewpoint_stack = scene.getTestCameras().copy()
                 viewpoint_stack = test_views
                 print("Test images: ", len(viewpoint_stack))
                 image_name = [c.image_name for c in viewpoint_stack]
                 print(image_name)
-            else:
+            else: #train
                 # viewpoint_stack = scene.getTrainCameras().copy()
                 viewpoint_stack = train_views
                 print("Train images: ", len(viewpoint_stack))
@@ -463,7 +536,7 @@ class GaussianTrainer(object):
         cam_info["R"] = R
         cam_info["t"] = t
 
-        if orthogonal:
+        if orthogonal: # true
             R = np.eye(3)
             t = np.zeros(3)
         elif pose is not None:
@@ -473,9 +546,9 @@ class GaussianTrainer(object):
             R = np.eye(3)
             t = np.zeros(3)
 
-        if load_depth:
+        if load_depth: # true
             if idx not in self.mono_depth:
-                depth_tensor = self.predict_depth(np.asarray(image_np) * 255)
+                depth_tensor = self.predict_depth(np.asarray(image_np) * 255, img_idx=idx)
                 # depth_tensor = self.depth_model.infer_pil(image_pil, output_type='tensor')
                 depth_tensor[depth_tensor < self.near] = self.near
                 self.mono_depth[idx] = depth_tensor.cuda()
@@ -498,12 +571,12 @@ class GaussianTrainer(object):
                                   gt_alpha_mask=mask, image_name=image_name,
                                   intrinsics=intrinsics,
                                   uid=idx, is_co3d=True)
-
+        # down_sample operation
         pcd_data = o3d.geometry.PointCloud()
         pcd_data.points = o3d.utility.Vector3dVector(points)
         pcd_data.colors = o3d.utility.Vector3dVector(image_np.reshape(-1, 3))
         pcd_data.estimate_normals()
-        if down_sample:
+        if down_sample: # true
             pcd_data = pcd_data.voxel_down_sample(voxel_size=0.01)
 
         colors = np.asarray(pcd_data.colors, dtype=np.float32)
@@ -511,7 +584,7 @@ class GaussianTrainer(object):
         normals = np.asarray(pcd_data.normals, dtype=np.float32)
         pcd = BasicPointCloud(points, colors, normals)
 
-        return cam_info, pcd, viewpoint_camera
+        return cam_info, pcd, viewpoint_camera, pts
 
     def prepare_custom_data(self, idx, down_sample=True,
                             orthogonal=True, pose=None,
@@ -543,7 +616,7 @@ class GaussianTrainer(object):
         FoVy = focal2fov(focal_length_y, height)
         FoVx = focal2fov(focal_length_x, width)
 
-        
+
         cam_info = {}
         pose_src = np.eye(4)
         cam_info["gt_pose"] = copy(pose_src)
@@ -596,7 +669,7 @@ class GaussianTrainer(object):
         normals = np.asarray(pcd_data.normals, dtype=np.float32)
         pcd = BasicPointCloud(points, colors, normals)
 
-        return cam_info, pcd, viewpoint_camera
+        return cam_info, pcd, viewpoint_camera, pts
 
 
     def prepare_data(self, idx, down_sample=True,
@@ -645,7 +718,7 @@ class GaussianTrainer(object):
 
             if load_depth:
                 if idx not in self.mono_depth:
-                    depth_tensor = self.predict_depth(np.asarray(image))
+                    depth_tensor = self.predict_depth(np.asarray(image), img_idx=idx)
                     # depth_tensor = self.depth_model.infer_pil(image, output_type='tensor')
                     # depth_tensor[depth_tensor < self.near] = self.near
                     self.mono_depth[idx] = depth_tensor.cuda()
@@ -675,7 +748,7 @@ class GaussianTrainer(object):
                                     uid=idx, is_co3d=True)
             if load_depth:
                 if idx not in self.mono_depth:
-                    depth_tensor = self.predict_depth(np.asarray(original_image))
+                    depth_tensor = self.predict_depth(np.asarray(original_image), img_idx=idx)
                     self.mono_depth[idx] = depth_tensor.cuda()
         else:
             viewpoint_camera = copy(self.data[idx])
@@ -720,7 +793,7 @@ class GaussianTrainer(object):
 
             if load_depth:
                 if idx not in self.mono_depth:
-                    depth_tensor = self.predict_depth(np.asarray(image_pil))
+                    depth_tensor = self.predict_depth(np.asarray(image_pil), img_idx=idx)
                     # depth_tensor = self.depth_model.infer_pil(image_pil, output_type='tensor')
                     depth_tensor[depth_tensor < self.near] = self.near
                     self.mono_depth[idx] = depth_tensor.cuda()

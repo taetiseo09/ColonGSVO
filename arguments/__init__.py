@@ -66,11 +66,28 @@ class ModelParams(ParamGroup):
         self.data_type = "tanks"
         self.depth_model_type = "dpt"
         self.mode = "train"
+        self.start_cam = 0
+        self.end_cam = 0
         # self.eval_nvs = False
         # self.eval_pose = False
         # self.vis_mesh = False
         # self.render_nvs = False
         self.traj_opt = "bspline"
+        self.use_flow_loss = False
+        self.flow_model_path = ""
+        self.align_brightness = False
+        self.visualize_mask = False  # 是否可视化mask
+        self.mask_save_dir = "mask_visualizations"  # mask可视化保存目录名
+        self.flow_model_name = 'unimatch'
+        self.flow_ckpt_name = 'mix'
+        self.inverse_depth = False  # 是否对深度图取反
+        self.inverse_depth_interval = 0  # 每k张深度图取反一张，0表示不使用间隔取反
+        self.visualize_depth = False  # 是否可视化保存深度图（使用紫到黄的颜色映射）
+        self.depth_vis_dir = "depth_visualizations"  # 深度可视化保存目录
+        self.depth_scale = 1.0  # 深度缩放因子，对深度值进行缩放
+        self.use_local_depth_scale: bool = False
+        self.local_depth_scale: float = 1.0
+        self.local_depth_scale_size: int = 100
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -95,6 +112,8 @@ class PipelineParams(ParamGroup):
         self.use_sampon = False
         self.refine = False
         self.distortion = False
+        self.train_test_split = 8  # 训练集测试集划分参数（原llffhold）
+
         super().__init__(parser, "Pipeline Parameters")
 
 
@@ -110,7 +129,8 @@ class OptimizationParams(ParamGroup):
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
         self.percent_dense = 0.01
-        self.lambda_dssim = 0.2
+        self.lambda_dssim = 0.2  # λ: 控制 L1 和 SSIM 的比例，L_rgb = (1-λ)*L1 + λ*SSIM
+        self.lambda_rgb = 1.0    # λ1: RGB loss 的整体权重
         self.lambda_depth = 0.0
         self.lambda_dist_2nd_loss = 0.0
         self.lambda_pc = 0.0
@@ -126,6 +146,29 @@ class OptimizationParams(ParamGroup):
         self.densify_until_iter = 15_000
         self.reset_until_iter = 15_000
         self.densify_grad_threshold = 0.0002
+        self.flow_loss_weight = 0.1  # λ2: 光流 loss 的权重
+
+        # 光强mask相关参数
+        self.intensity_threshold = 0.1  # 亮度差异阈值
+        self.intensity_kernel_size = 5  # 强度差异检测的邻域大小
+        self.intensity_dilate_iter = 1  # 强度mask膨胀迭代次数
+
+        # 亮度对齐相关参数
+        self.brightness_flow_threshold = 2.0  # 光流阈值
+        self.brightness_edge_smoothness = 21  # 边缘平滑参数
+        self.brightness_dilate_size = 7  # 膨胀核大小
+        self.brightness_dilate_iter = 3  # 膨胀迭代次数
+        self.brightness_edge_window = 15  # 边缘窗口大小
+
+        # 提前停止相关参数
+        self.enable_early_stop = False  # 是否启用提前停止机制
+
+        # Pose估计相关的iteration参数
+        self.init_two_view_iterations = 1000  # 初始化两帧视图的迭代次数
+        self.add_view_gs_local_iterations = 500  # 添加视图时局部GS拟合的迭代次数
+        self.add_view_tracking_iterations = 300  # 添加视图时tracking阶段的迭代次数
+        self.eval_nvs_epochs = 200  # 新视角合成评估的epoch数量
+
         super().__init__(parser, "Optimization Parameters")
 
 
