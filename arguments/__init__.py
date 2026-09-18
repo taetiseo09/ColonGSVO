@@ -68,8 +68,6 @@ class ModelParams(ParamGroup):
         self.mode = "train"
         self.start_cam = 0
         self.end_cam = 0
-        # self.eval_nvs = False
-        # self.eval_pose = False
         # self.vis_mesh = False
         # self.render_nvs = False
         self.traj_opt = "bspline"
@@ -88,6 +86,7 @@ class ModelParams(ParamGroup):
         self.use_local_depth_scale: bool = False
         self.local_depth_scale: float = 1.0
         self.local_depth_scale_size: int = 100
+        self.video_fps = 10
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -167,7 +166,7 @@ class OptimizationParams(ParamGroup):
         self.init_two_view_iterations = 1000  # 初始化两帧视图的迭代次数
         self.add_view_gs_local_iterations = 500  # 添加视图时局部GS拟合的迭代次数
         self.add_view_tracking_iterations = 300  # 添加视图时tracking阶段的迭代次数
-        self.eval_nvs_epochs = 200  # 新视角合成评估的epoch数量
+        self.eval_reconstruction_epochs = 200
 
         super().__init__(parser, "Optimization Parameters")
 

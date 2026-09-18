@@ -14,6 +14,7 @@ IMAGE_DIR="color"
 EXPNAME="c3vd_inverse_depth_demo"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 INTENSITY_THRESHOLD=0.5
+VIDEO_FPS=10
 EVAL_ONLY=0
 SKIP_EVAL=0
 DRY_RUN=0
@@ -39,8 +40,10 @@ Options:
   --expname NAME        Output experiment name.
   --python PATH         Python executable (default: python).
   --intensity FLOAT     Intensity mask threshold (default: 0.5).
-  --eval-only           Reuse an existing checkpoint and only evaluate.
-  --skip-eval           Train without pose/NVS evaluation.
+  --video-fps N         Output reconstruction video FPS (default: 10).
+  --eval-only           Reuse an existing checkpoint and only evaluate RGB
+                        reconstruction quality and rendering FPS.
+  --skip-eval           Train without reconstruction evaluation.
   --dry-run             Print commands without running them.
   -h, --help            Show this help.
 
@@ -61,6 +64,7 @@ while (($#)); do
         --expname) EXPNAME="$2"; shift 2 ;;
         --python) PYTHON_BIN="$2"; shift 2 ;;
         --intensity) INTENSITY_THRESHOLD="$2"; shift 2 ;;
+        --video-fps) VIDEO_FPS="$2"; shift 2 ;;
         --eval-only) EVAL_ONLY=1; shift ;;
         --skip-eval) SKIP_EVAL=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
@@ -73,8 +77,8 @@ if [[ -z "$DATA_ROOT" ]]; then
     echo "Error: --data-root or C3VD_DATA_ROOT is required." >&2
     exit 2
 fi
-if ! [[ "$START_CAM" =~ ^[0-9]+$ && "$END_CAM" =~ ^[0-9]+$ && "$SPLIT_RATE" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Error: --start/--end must be non-negative integers and --split must be positive." >&2
+if ! [[ "$START_CAM" =~ ^[0-9]+$ && "$END_CAM" =~ ^[0-9]+$ && "$SPLIT_RATE" =~ ^[1-9][0-9]*$ && "$VIDEO_FPS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --start/--end must be non-negative integers; --split and --video-fps must be positive." >&2
     exit 2
 fi
 if ((END_CAM != 0 && END_CAM <= START_CAM)); then
@@ -114,6 +118,7 @@ common_args=(
     --train_test_split "$SPLIT_RATE"
     --inverse_depth
     --intensity_threshold "$INTENSITY_THRESHOLD"
+    --video_fps "$VIDEO_FPS"
 )
 
 echo "Scene:       $SCENE"
@@ -139,10 +144,5 @@ fi
 
 run_command "$PYTHON_BIN" run_cf3dgs.py \
     "${common_args[@]}" \
-    --mode eval_pose \
-    --model_path "$MODEL_PATH"
-
-run_command "$PYTHON_BIN" run_cf3dgs.py \
-    "${common_args[@]}" \
-    --mode eval_nvs \
+    --mode eval_reconstruction \
     --model_path "$MODEL_PATH"

@@ -5,7 +5,7 @@ This repository extends [NVlabs/CF-3DGS](https://github.com/NVlabs/CF-3DGS) with
 - C3VD image/pose loading and configurable train/test splits;
 - DPT monocular-depth initialization with optional inverse depth;
 - PTLFlow optical-flow supervision and intensity masking;
-- pose, novel-view-synthesis, and runtime evaluation;
+- RGB reconstruction reporting, video export, and rendering-FPS evaluation;
 - a parameterized train/evaluate script with no machine-specific paths.
 
 The repository intentionally excludes datasets, checkpoints, generated results, model caches, and local third-party checkouts.
@@ -63,7 +63,7 @@ The loader uses the reference C3VD intrinsics by default. To override them for a
 
 ## Run the demo
 
-The following command trains on frames `[0, 300)`, holds out the last frame in every four-frame group, then evaluates pose and novel-view synthesis:
+The following command trains on frames `[0, 300)`, holds out the last frame in every four-frame group, then reports RGB reconstruction quality and rendering FPS. Depth and pose tests are not part of the evaluation pipeline.
 
 ```bash
 ./train_c3vd_depth.sh \
@@ -85,15 +85,22 @@ Use `./train_c3vd_depth.sh --help` for all options. Two useful modes are:
 ./train_c3vd_depth.sh --data-root /path/to/C3VD --eval-only
 ```
 
+The evaluation produces only two report sections:
+
+1. `reconstruction`: PSNR, SSIM, LPIPS, rendered frames, and an MP4 video.
+2. `rendering`: synchronized CUDA rendering FPS.
+
 The default output is:
 
 ```text
 output/c3vd_inverse_depth_demo/<scene>_<start>_<end>/
 ├── chkpnt/ep00_init.pth
-├── pose/
-├── eval/
 ├── train/
-└── timing_*.json
+└── test/
+    ├── frames/*.png
+    ├── reconstruction.mp4
+    ├── report.json
+    └── report.md
 ```
 
 Use the same `--scene`, `--start`, `--end`, `--split`, and `--expname` values for training and evaluation. The demo script enforces this automatically.
@@ -120,12 +127,36 @@ python run_cf3dgs.py \
 
 `--data_type tanks` is retained for compatibility with the original trainer. Dataset dispatch detects C3VD from `pose.txt`.
 
+To evaluate an existing checkpoint with the dedicated two-section evaluator:
+
+```bash
+./evaluate_c3vd.sh \
+  --source /path/to/C3VD/sigmoid_t3_a \
+  --model-path output/c3vd_inverse_depth_demo/sigmoid_t3_a_0_300/chkpnt/ep00_init.pth \
+  --start 0 \
+  --end 300 \
+  --split 4 \
+  --video-fps 10
+```
+
+## Example reconstruction report
+
+The included `sigmoid_t3_a`, frames `[0, 300)`, split-8 result contains 37 held-out views:
+
+- Reconstruction: **PSNR 31.681, SSIM 0.853, LPIPS 0.297**.
+- Rendering FPS: **299.21**.
+- [Download the reconstruction video](assets/c3vd_sigmoid_t3_a_reconstruction.mp4).
+- [View the machine-readable report](assets/c3vd_sigmoid_t3_a_report.json).
+
+The reported FPS measures only synchronized Gaussian rendering. Metric computation, PNG writing, and MP4 encoding are excluded.
+
 ## Reproducibility notes
 
 - The C3VD demo uses `DPT_Hybrid` through `torch.hub` and UniMatch through PTLFlow (`mix` checkpoint).
 - Generated weights, visualizations, data, logs, and caches are ignored by Git.
 - `DepthAnything/` and `RAFT/` are not vendored. The released C3VD demo does not depend on those local checkouts.
-- The code records initialization, tracking, mapping, per-frame, and aggregate timing statistics in the experiment directory.
+- Monocular depth remains part of training initialization, but no depth metric or depth image is produced by evaluation.
+- Pose estimates remain an internal reconstruction input, but no pose metric or pose report is produced.
 
 ## Upstream project and citation
 

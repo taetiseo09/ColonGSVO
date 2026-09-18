@@ -12,18 +12,7 @@ from argparse import ArgumentParser
 from trainer.cf3dgs_trainer import CFGaussianTrainer
 from arguments import ModelParams, PipelineParams, OptimizationParams
 
-import torch
 from datetime import datetime
-
-
-def construct_pose(poses):
-    n_trgt = poses.shape[0]
-    # for i in range(n_trgt-1):
-    #     poses[i+1] = poses[i+1] @ torch.inverse(poses[i])
-    for i in range(n_trgt-1, 0, -1):
-        poses = torch.cat(
-            (poses[:i], poses[[i-1]]@poses[i:]), 0)
-    return poses
 
 
 if __name__ == "__main__":
@@ -63,11 +52,9 @@ if __name__ == "__main__":
     start_time = datetime.now()
     if model_cfg.mode == "train":
         trainer.train_from_progressive()
-    elif model_cfg.mode == "render":
-        trainer.render_nvs(traj_opt=model_cfg.traj_opt)
-    elif model_cfg.mode == "eval_nvs":
-        trainer.eval_nvs()
-    elif model_cfg.mode == "eval_pose":
-        trainer.eval_pose()
+    elif model_cfg.mode == "eval_reconstruction":
+        trainer.eval_reconstruction()
+    else:
+        parser.error("--mode must be either 'train' or 'eval_reconstruction'")
     end_time = datetime.now()
     print('Duration: {}'.format(end_time - start_time))

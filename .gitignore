@@ -55,6 +55,7 @@ diff_rasterization/dist/
 *.tif
 *.tiff
 *.mp4
+!assets/*.mp4
 *.log
 
 # Notebooks

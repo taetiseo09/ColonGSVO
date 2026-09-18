@@ -2,6 +2,7 @@ tqdm>=4.66
 Pillow>=9.5
 opencv-python==4.8.1.78
 imageio==2.37.0
+imageio-ffmpeg==0.6.0
 matplotlib==3.7.0
 PyYAML==6.0.2
 plyfile==1.1

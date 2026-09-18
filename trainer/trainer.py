@@ -64,7 +64,10 @@ class GaussianTrainer(object):
         self.render_image = OrderedDict()
         self.mono_depth = OrderedDict()
         self.setup_dataset()
-        self.setup_depth_predictor()
+        if self.model_cfg.mode == "train":
+            self.setup_depth_predictor()
+        else:
+            self.depth_model = None
         print(f"[cfg] use_local_depth_scale={self.use_local_depth_scale}, "
               f"local_depth_scale={self.local_depth_scale}, "
               f"local_depth_scale_size={self.local_depth_scale_size}, "
@@ -378,8 +381,7 @@ class GaussianTrainer(object):
             ids = np.arange(len(all_views))
             self.i_test = ids[int(sample_rate/2)::sample_rate]
             self.i_train = np.array([i for i in ids if i not in self.i_test])
-            if "eval" in self.model_cfg.mode: #eval_post, eval_nvs
-                # if self.model_cfg.eval_pose or self.model_cfg.eval_nvs:
+            if "eval" in self.model_cfg.mode:
                 # viewpoint_stack = scene.getTestCameras().copy()
                 viewpoint_stack = test_views
                 print("Test images: ", len(viewpoint_stack))

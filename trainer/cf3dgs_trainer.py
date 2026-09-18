@@ -7,7 +7,6 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import os
-import sys
 from tqdm import tqdm
 from random import randint
 import math
@@ -22,7 +21,6 @@ from torchvision import io
 from PIL import Image
 from einops import rearrange
 import pickle
-import scipy
 import imageio
 import glob
 import cv2
@@ -37,22 +35,17 @@ from scene.cameras import Camera
 from utils.loss_utils import l1_loss, ssim
 from lpipsPyTorch import lpips
 from utils.image_utils import psnr, colorize, align_brightness_with_flow
-from utils.utils_poses.align_traj import align_ate_c2b_use_a2b, align, evaluate_ate
-from utils.utils_poses.comp_ate import compute_rpe, compute_ATE
 from utils.mask_utils import compute_epipolar_loss, adaptive_thresholding, generate_intensity_diff_mask, save_masks_as_png
 from kornia.geometry.depth import depth_to_3d, depth_to_3d_v2, depth_to_normals
 from kornia.geometry.camera import project_points
 import ptlflow
-from ptlflow.utils import flow_utils
 from ptlflow.utils.io_adapter import IOAdapter
-import pdb
 import time
 from .trainer import GaussianTrainer
 from .losses import Loss, compute_scale_and_shift
 from .timing_utils import TimingStats
 
 from copy import copy
-from utils.vis_utils import interp_poses_bspline, generate_spiral_nerf, plot_pose, plot_fixed_gt_pose, umeyama_alignment
 
 # def attach_debugger():
 #     import debugpy
@@ -764,9 +757,6 @@ class CFGaussianTrainer(GaussianTrainer):
         if self.timing_stats is not None:
             self.timing_stats.stop_tracking_frame()
 
-        # self.visualize(rend_dict_ref, "vis/render_optim.png",
-        #                gt_image=viewpoint_cam_ref.original_image.cuda(),
-        #                gt_depth=self.mono_depth[view_idx_prev])
         local_model_params = self.gs_render_local.gaussians.capture()
 
         # pcd under view_idx_prev frame
@@ -1071,666 +1061,177 @@ class CFGaussianTrainer(GaussianTrainer):
 
 
 
-    def eval_nvs(self, ):
+    def eval_reconstruction(self):
+        """Evaluate RGB reconstruction quality and renderer throughput only."""
+        if not self.model_cfg.model_path:
+            raise ValueError("--model_path is required for reconstruction evaluation")
+        if self.seq_len == 0:
+            raise ValueError("The reconstruction evaluation set is empty")
+
         pipe = copy(self.pipe_cfg)
+        pipe.convert_SHs_python = True
         optim_opt = copy(self.optim_cfg)
-        num_epochs = self.optim_cfg.eval_nvs_epochs
-        num_iterations = num_epochs * self.seq_len #number of test views
+        num_iterations = self.optim_cfg.eval_reconstruction_epochs * self.seq_len
         optim_opt.iterations = num_iterations
         optim_opt.position_lr_max_steps = num_iterations
         optim_opt.densify_until_iter = num_iterations // 2
         optim_opt.reset_until_iter = num_iterations // 2
-        optim_opt.opacity_reset_interval = num_iterations // 10
+        optim_opt.opacity_reset_interval = max(1, num_iterations // 10)
         optim_opt.densification_interval = 100
         optim_opt.densify_from_iter = 500
-        # self.optim_cfg.densification_interval = 100
 
-        if pipe.expname == "":
-            expname = "progressive"
-        else:
-            expname = pipe.expname
-        pipe.convert_SHs_python = True
-        optim_opt = copy(self.optim_cfg)
-        # result_path = f"vis/{expname}/{self.category}_{self.seq_name}"
         result_path = os.path.dirname(
-            self.model_cfg.model_path).replace('chkpnt', 'test')
-        os.makedirs(result_path, exist_ok=True)
+            self.model_cfg.model_path
+        ).replace("chkpnt", "test")
+        frame_dir = os.path.join(result_path, "frames")
+        os.makedirs(frame_dir, exist_ok=True)
 
-        pose_dict = dict()
-        pose_dict["poses_gt"] = []
-        for seq_data in self.data:
-            if self.data_type == "co3d":
-                R, t, _, _, _ = self.load_camera(seq_data)
-            else:
-                try:
-                    R = seq_data.R.transpose()
-                    t = seq_data.T
-                except:
-                    R = np.eye(3)
-                    t = np.zeros(3)
-            pose = np.eye(4)
-            pose[:3, :3] = R
-            pose[:3, 3] = t
-            pose_dict["poses_gt"].append(torch.from_numpy(pose))
-
-        max_frame = self.seq_len #test lens
-        start_frame = 0
-        end_frame = max_frame
-        if self.model_cfg.model_path != "":
-            self.gs_render.gaussians.restore(
-                torch.load(self.model_cfg.model_path), self.optim_cfg) # reload model from chkpnt/ep00_init;
-            pose_dict_train = torch.load(
-                self.model_cfg.model_path.replace('chkpnt', 'pose')) # posed_gt and poses_pred 131
-            self.gs_render.gaussians.rotate_seq = True
-
-        # sample_rate = 2 if "Family" in result_path else 8
-        # pose_test_init = pose_dict_train['poses_pred'][int(
-        #     sample_rate/2)::sample_rate-1][:max_frame] # 从train中选test？
-
-        # 通过计算准确的索引获取样本
-        total_frames = len(pose_dict_train['poses_pred'])
-        indices = np.linspace(0, total_frames-1, max_frame).astype(int)
-        pose_test_init = torch.stack([pose_dict_train['poses_pred'][i] for i in indices])
+        self.gs_render.gaussians.restore(
+            torch.load(self.model_cfg.model_path), self.optim_cfg
+        )
+        pose_dict_train = torch.load(
+            self.model_cfg.model_path.replace("chkpnt", "pose")
+        )
+        total_frames = len(pose_dict_train["poses_pred"])
+        indices = np.linspace(0, total_frames - 1, self.seq_len).astype(int)
+        pose_test_init = torch.stack(
+            [pose_dict_train["poses_pred"][index] for index in indices]
+        )
 
         self.gs_render.gaussians.init_RT_seq(
-            self.seq_len, pose_test_init.float())
+            self.seq_len, pose_test_init.float()
+        )
         self.gs_render.gaussians.rotate_seq = True
-        self.gs_render.gaussians.training_setup(optim_opt,
-                                                fix_pos=True,
-                                                fix_feat=True,
-                                                fit_pose=True,)
-        progress_bar = tqdm(range(num_iterations),
-                            desc="Training progress")
+        self.gs_render.gaussians.training_setup(
+            optim_opt,
+            fix_pos=True,
+            fix_feat=True,
+            fit_pose=True,
+        )
 
+        progress_bar = tqdm(
+            range(num_iterations), desc="Optimizing evaluation camera poses"
+        )
         iteration = 0
-        for epoch in range(num_epochs):
-            for fidx in range(self.seq_len):
+        for _ in range(self.optim_cfg.eval_reconstruction_epochs):
+            for frame_index in range(self.seq_len):
                 iteration += 1
                 self.gs_render.gaussians.rotate_seq = True
-                self.gs_render.gaussians.set_seq_idx(fidx)
-                viewpoint_cam = self.load_viewpoint_cam(fidx,
-                                                        pose=None,
-                                                        load_depth=True,
-                                                        )
-                # self.gs_render.gaussians.update_learning_rate_camera(
-                #     fidx, iteration)
-                loss_dict, rend_dict, psnr_train = self.train_step(self.gs_render,
-                                                                   viewpoint_cam,
-                                                                   iteration, pipe, optim_opt,
-                                                                   densify=False,
-                                                                   depth_gt=None,
-                                                                   update_cam=True,
-                                                                   update_gaussians=False,
-                                                                   reset=False,
-                                                                   )
+                self.gs_render.gaussians.set_seq_idx(frame_index)
+                viewpoint_cam = self.load_viewpoint_cam(
+                    frame_index, pose=None, load_depth=False
+                )
+                _, _, psnr_train = self.train_step(
+                    self.gs_render,
+                    viewpoint_cam,
+                    iteration,
+                    pipe,
+                    optim_opt,
+                    densify=False,
+                    depth_gt=None,
+                    update_cam=True,
+                    update_gaussians=False,
+                    reset=False,
+                )
                 if iteration % 10 == 0:
-                    progress_bar.set_postfix({"PSNR": f"{psnr_train:.{2}f}"})
+                    progress_bar.set_postfix({"PSNR": f"{psnr_train:.2f}"})
                     progress_bar.update(10)
-                if iteration == optim_opt.iterations:
-                    progress_bar.close()
-                if iteration > 0 and (iteration == 100):
-                    print("\n[ITER {}] Saving Gaussians".format(iteration))
-                    self.gs_render.gaussians.save_ply(os.path.join(os.path.dirname(result_path),"point_cloud1.ply"))
+        progress_bar.close()
 
-        psnr_test = 0
-        ssim_test = 0
-        lpips_test = 0
-        total_time = 0.0
-
-        # 预先创建测试输出目录
-        os.makedirs(f"{result_path}/test", exist_ok=True)
+        psnr_total = 0.0
+        ssim_total = 0.0
+        lpips_total = 0.0
+        rendering_time = 0.0
+        frame_paths = []
 
         with torch.no_grad():
-            for fidx in range(self.seq_len):
+            for frame_index in range(self.seq_len):
                 self.gs_render.gaussians.rotate_seq = False
-                viewpoint_cam = self.load_viewpoint_cam(fidx,
-                                                        pose=self.gs_render.gaussians.get_RT(
-                                                            fidx).detach().cpu(),
-                                                        load_depth=True,
-                                                        )
+                viewpoint_cam = self.load_viewpoint_cam(
+                    frame_index,
+                    pose=self.gs_render.gaussians.get_RT(
+                        frame_index
+                    ).detach().cpu(),
+                    load_depth=False,
+                )
 
-                # 使用简单的frame index作为文件名，确保唯一性
-                image_filename = f"{result_path}/test/{fidx:04d}.png"
+                torch.cuda.synchronize()
+                start_time = time.perf_counter()
+                render_dict = self.gs_render.render(
+                    viewpoint_cam,
+                    compute_cov3D_python=False,
+                    convert_SHs_python=False,
+                )
+                torch.cuda.synchronize()
+                rendering_time += time.perf_counter() - start_time
 
-                start = time.time()
-                render_dict = self.gs_render.render(viewpoint_cam,
-                                                    compute_cov3D_python=False,
-                                                    convert_SHs_python=False)
-                torch.cuda.synchronize()  # 如果用GPU，确保计时准确
-                end = time.time()
-                total_time += (end - start)
-                print(f"帧 {fidx}: 渲染耗时 {end - start:.4f} 秒")
                 gt_image = viewpoint_cam.original_image.cuda()
-                psnr_test += psnr(render_dict["image"],
-                                  gt_image).mean().double()
-                ssim_test += ssim(render_dict["image"],
-                                  gt_image).mean().double()
-                lpips_test += lpips(render_dict["image"],
-                                    gt_image, net_type="vgg").mean().double()
+                psnr_total += psnr(render_dict["image"], gt_image).mean().item()
+                ssim_total += ssim(render_dict["image"], gt_image).mean().item()
+                lpips_total += lpips(
+                    render_dict["image"], gt_image, net_type="vgg"
+                ).mean().item()
 
-                # 保存图片
-                print(f"正在保存图片: {image_filename}")
-                self.visualize(render_dict,
-                               image_filename,
-                               gt_image=gt_image, save_ply=False)
-                print(f"已保存帧 {fidx:04d} 的图片")
-        avg_time = total_time / self.seq_len
-        fps = 1.0 / avg_time if avg_time > 0 else 0
-        print(f"\n平均每帧耗时: {avg_time:.4f} 秒, FPS: {fps:.2f}")
+                frame_path = os.path.join(frame_dir, f"{frame_index:04d}.png")
+                self.visualize(
+                    render_dict, frame_path, gt_image=gt_image, save_ply=False
+                )
+                frame_paths.append(frame_path)
 
-        with open(f"{result_path}/test.txt", 'w') as f:
-            f.write('PSNR : {:.03f}, SSIM : {:.03f}, LPIPS : {:.03f}'.format(
-                    psnr_test / end_frame,
-                    ssim_test / end_frame,
-                    lpips_test / end_frame))
-            f.close()
+        reconstruction = {
+            "frames": self.seq_len,
+            "psnr": psnr_total / self.seq_len,
+            "ssim": ssim_total / self.seq_len,
+            "lpips": lpips_total / self.seq_len,
+        }
+        rendering_fps = self.seq_len / rendering_time
 
-        print('Number of {:03d} to {:03d} frames: PSNR : {:.03f}, SSIM : {:.03f}, LPIPS : {:.03f}'.format(
-            start_frame,
-            end_frame,
-            psnr_test / end_frame,
-            ssim_test / end_frame,
-            lpips_test / end_frame))
+        video_path = os.path.join(result_path, "reconstruction.mp4")
+        with imageio.get_writer(
+            video_path,
+            fps=self.model_cfg.video_fps,
+            codec="libx264",
+            quality=8,
+            pixelformat="yuv420p",
+            macro_block_size=None,
+            output_params=["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"],
+        ) as video:
+            for frame_path in frame_paths:
+                video.append_data(imageio.imread(frame_path))
 
-    def eval_pose_split(self, ):
-        pipe = copy(self.pipe_cfg)
-        optim_opt = copy(self.optim_cfg)
-        result_path = os.path.dirname(
-            self.model_cfg.model_path).replace('chkpnt', 'pose')
-        os.makedirs(result_path, exist_ok=True)
-        pose_path = os.path.join(result_path, 'ep00_init.pth')
-        poses = torch.load(pose_path)
-        poses_pred = poses['poses_pred'].inverse().cpu()
-        poses_gt_c2w = poses['poses_gt'].inverse().cpu()
-        poses_gt = poses_gt_c2w[:len(poses_pred)].clone()
+        report = {
+            "reconstruction": {
+                **reconstruction,
+                "video": os.path.basename(video_path),
+            },
+            "rendering": {
+                "fps": rendering_fps,
+            },
+        }
+        report_path = os.path.join(result_path, "report.json")
+        with open(report_path, "w", encoding="utf-8") as report_file:
+            json.dump(report, report_file, indent=2)
 
-        ate, est, gt = evaluate_ate(poses['poses_pred'], poses['poses_gt'])
-        print('-----ate:', ate)
-        # 拆分为前半部分和后半部分
-        mid_idx = len(poses_pred) // 2
-
-        # 创建结果文件来保存所有评估指标
-        with open(f"{result_path}/pose_eval_split.txt", 'w') as f:
-            # 处理前半部分位姿
-            f.write("===== 前半部分位姿评估 =====\n")
-
-            poses_gt_first = poses_gt[:mid_idx]
-            poses_pred_first = poses_pred[:mid_idx]
-
-            # 对前半部分进行对齐
-            trans_gt_align_first, trans_est_align_first, _ = self.align_pose(
-                poses_gt_first[:, :3, -1].numpy(),
-                poses_pred_first[:, :3, -1].numpy()
-            )
-            poses_gt_first[:, :3, -1] = torch.from_numpy(trans_gt_align_first)
-            poses_pred_first[:, :3, -1] = torch.from_numpy(trans_est_align_first)
-
-            c2ws_est_aligned_first = align_ate_c2b_use_a2b(poses_pred_first, poses_gt_first)
-            ate_first = compute_ATE(poses_gt_first.cpu().numpy(),
-                            c2ws_est_aligned_first.cpu().numpy())
-            rpe_trans_first, rpe_rot_first = compute_rpe(
-                poses_gt_first.cpu().numpy(), c2ws_est_aligned_first.cpu().numpy())
-
-            print("前半部分位姿评估:")
-            print("{0:.3f}".format(rpe_trans_first*100),
-                '&' "{0:.3f}".format(rpe_rot_first * 180 / np.pi),
-                '&', "{0:.3f}".format(ate_first))
-
-            # 保存前半部分位姿评估指标
-            f.write("RPE_trans: {:.03f}, RPE_rot: {:.03f}, ATE: {:.03f}\n".format(
-                rpe_trans_first*100,
-                rpe_rot_first * 180 / np.pi,
-                ate_first))
-
-            # 可视化前半部分位姿
-            plot_pose(
-                poses_gt_first.cpu().numpy(),
-                c2ws_est_aligned_first.cpu().numpy(),
-                os.path.join(result_path, 'pose_first_half'),
-                fig_size=(12, 10),
-                set_limits=True,
-                pose_name="pose_vis_first_half.png"
+        markdown_path = os.path.join(result_path, "report.md")
+        with open(markdown_path, "w", encoding="utf-8") as markdown_file:
+            markdown_file.write(
+                "# Reconstruction report\n\n"
+                f"- Reconstruction: PSNR {reconstruction['psnr']:.3f}, "
+                f"SSIM {reconstruction['ssim']:.3f}, "
+                f"LPIPS {reconstruction['lpips']:.3f}; "
+                f"video `{os.path.basename(video_path)}` "
+                f"({self.seq_len} frames).\n"
+                f"- Rendering FPS: {rendering_fps:.2f}.\n"
             )
 
-            # 处理后半部分位姿
-            f.write("\n===== 后半部分位姿评估 =====\n")
-
-            poses_gt_second = poses_gt[mid_idx:]
-            poses_pred_second = poses_pred[mid_idx:]
-
-            # 对后半部分进行对齐
-            trans_gt_align_second, trans_est_align_second, _ = self.align_pose(
-                poses_gt_second[:, :3, -1].numpy(),
-                poses_pred_second[:, :3, -1].numpy()
-            )
-            poses_gt_second[:, :3, -1] = torch.from_numpy(trans_gt_align_second)
-            poses_pred_second[:, :3, -1] = torch.from_numpy(trans_est_align_second)
-
-            c2ws_est_aligned_second = align_ate_c2b_use_a2b(poses_pred_second, poses_gt_second)
-            ate_second = compute_ATE(poses_gt_second.cpu().numpy(),
-                            c2ws_est_aligned_second.cpu().numpy())
-            rpe_trans_second, rpe_rot_second = compute_rpe(
-                poses_gt_second.cpu().numpy(), c2ws_est_aligned_second.cpu().numpy())
-
-            print("后半部分位姿评估:")
-            print("{0:.3f}".format(rpe_trans_second*100),
-                '&' "{0:.3f}".format(rpe_rot_second * 180 / np.pi),
-                '&', "{0:.3f}".format(ate_second))
-
-            # 保存后半部分位姿评估指标
-            f.write("RPE_trans: {:.03f}, RPE_rot: {:.03f}, ATE: {:.03f}\n".format(
-                rpe_trans_second*100,
-                rpe_rot_second * 180 / np.pi,
-                ate_second))
-
-            # 可视化后半部分位姿
-            plot_pose(
-                poses_gt_second.cpu().numpy(),
-                c2ws_est_aligned_second.cpu().numpy(),
-                os.path.join(result_path, 'pose_second_half'),
-                fig_size=(12, 10),
-                set_limits=True,
-                pose_name="pose_vis_second_half.png"
-            )
-
-            f.write("\n===== 全部位姿合并可视化（分别对齐） =====\n")
-
-            # 使用前面已经分别对齐的结果
-            # 将前半部分和后半部分位姿合并
-            poses_gt_combined = torch.cat([poses_gt_first, poses_gt_second], dim=0)
-            c2ws_est_aligned_combined = torch.cat([c2ws_est_aligned_first, c2ws_est_aligned_second], dim=0)
-
-            # 计算合并后的评估指标
-            combined_ate = compute_ATE(poses_gt_combined.cpu().numpy(),
-                        c2ws_est_aligned_combined.cpu().numpy())
-            combined_rpe_trans, combined_rpe_rot = compute_rpe(
-                poses_gt_combined.cpu().numpy(), c2ws_est_aligned_combined.cpu().numpy())
-
-            print("合并位姿评估（分别对齐）:")
-            print("{0:.3f}".format(combined_rpe_trans*100),
-                '&' "{0:.3f}".format(combined_rpe_rot * 180 / np.pi),
-                '&', "{0:.3f}".format(combined_ate))
-
-            # 保存合并位姿评估指标
-            f.write("RPE_trans: {:.03f}, RPE_rot: {:.03f}, ATE: {:.03f}\n".format(
-                combined_rpe_trans*100,
-                combined_rpe_rot * 180 / np.pi,
-                combined_ate))
-
-            # 可视化合并位姿（从不同角度）
-            angles = [30, 45, 135]  # 三个不同的观察角度
-            eles = [30, 15, 0]      # 三个不同的仰角
-
-            for angle in angles:
-                for ele in eles:
-                    plot_pose(
-                        poses_gt_combined.cpu().numpy(),
-                        c2ws_est_aligned_combined.cpu().numpy(),
-                        os.path.join(result_path, f'pose_combined_{angle}'),
-                        fig_size=(12, 10),
-                        set_limits=True,
-                        pose_name=f"pose_vis_combined_{angle}_{ele}.png",
-                        view_angle=angle,
-                        view_ele=ele
-                    )
-
-            # 仍然保留原来的全部位姿整体对齐的评估（可选）
-            f.write("\n===== 全部位姿整体对齐评估 =====\n")
-
-            # 对所有位姿进行整体对齐
-            trans_gt_align, trans_est_align, _ = self.align_pose(poses_gt[:, :3, -1].numpy(),
-                                                            poses_pred[:, :3, -1].numpy())
-            poses_gt[:, :3, -1] = torch.from_numpy(trans_gt_align)
-            poses_pred[:, :3, -1] = torch.from_numpy(trans_est_align)
-
-            c2ws_est_aligned = align_ate_c2b_use_a2b(poses_pred, poses_gt)
-            ate = compute_ATE(poses_gt.cpu().numpy(),
-                        c2ws_est_aligned.cpu().numpy())
-            rpe_trans, rpe_rot = compute_rpe(
-                poses_gt.cpu().numpy(), c2ws_est_aligned.cpu().numpy())
-
-            print("全部位姿评估（整体对齐）:")
-            print("{0:.3f}".format(rpe_trans*100),
-                '&' "{0:.3f}".format(rpe_rot * 180 / np.pi),
-                '&', "{0:.3f}".format(ate))
-
-
-            # 保存全部位姿评估指标
-            f.write("RPE_trans: {:.03f}, RPE_rot: {:.03f}, ATE: {:.03f}\n".format(
-                rpe_trans*100,
-                rpe_rot * 180 / np.pi,
-                ate))
-    def eval_pose(self, ):
-        pipe = copy(self.pipe_cfg)
-        optim_opt = copy(self.optim_cfg)
-        result_path = os.path.dirname(
-            self.model_cfg.model_path).replace('chkpnt', 'pose')
-        os.makedirs(result_path, exist_ok=True)
-        pose_path = os.path.join(result_path, 'ep00_init.pth')
-        poses = torch.load(pose_path)
-        poses_pred = poses['poses_pred'].inverse().cpu()
-        poses_gt_c2w = poses['poses_gt'].inverse().cpu()
-        poses_gt = poses_gt_c2w[:len(poses_pred)].clone()
-
-        # 创建结果文件来保存所有评估指标
-        with open(f"{result_path}/pose_eval_fixed_gt.txt", 'w') as f:
-            f.write("===== 不改变GT位姿，仅对预测位姿进行对齐 =====\n")
-
-            # 使用Umeyama算法仅对预测轨迹进行变换，保持GT轨迹不变
-            # 1. 提取位置部分用于对齐
-            gt_positions = poses_gt[:, :3, 3].numpy()
-            pred_positions = poses_pred[:, :3, 3].numpy()
-
-            # 2. 计算从预测到GT的变换矩阵（缩放、旋转和平移）
-            s, R, t = umeyama_alignment(pred_positions, gt_positions)
-
-            # 3. 仅对预测轨迹应用变换
-            aligned_poses_pred = torch.zeros_like(poses_pred)
-            for i in range(len(poses_pred)):
-                # 提取旋转部分
-                R_pred = poses_pred[i, :3, :3].numpy()
-                t_pred = poses_pred[i, :3, 3].numpy()
-
-                # 应用变换: 先缩放、旋转位置，再加平移
-                t_aligned = s * (R @ t_pred) + t
-                R_aligned = R @ R_pred  # 旋转矩阵的变换
-
-                # 更新对齐后的预测位姿
-                aligned_poses_pred[i, :3, :3] = torch.from_numpy(R_aligned)
-                aligned_poses_pred[i, :3, 3] = torch.from_numpy(t_aligned)
-                aligned_poses_pred[i, 3, 3] = 1.0
-
-            # 计算对齐后的误差指标
-            ate = compute_ATE(poses_gt.cpu().numpy(), aligned_poses_pred.cpu().numpy())
-            rpe_trans, rpe_rot = compute_rpe(poses_gt.cpu().numpy(), aligned_poses_pred.cpu().numpy())
-
-            print("使用固定GT评估:")
-            print("RPE_trans: {:.3f}, RPE_rot: {:.3f}, ATE: {:.3f}".format(
-                rpe_trans*100, rpe_rot * 180 / np.pi, ate))
-
-            # 保存评估指标
-            f.write("RPE_trans: {:.03f}, RPE_rot: {:.03f}, ATE: {:.03f}\n".format(
-                rpe_trans*100, rpe_rot * 180 / np.pi, ate))
-
-            # 可视化固定GT和对齐后的预测轨迹
-            # 从不同角度可视化轨迹
-            angles = [30, 45, 135]  # 三个不同的观察角度
-            eles = [30, 15, 0]      # 三个不同的仰角
-
-            for angle in angles:
-                for ele in eles:
-                    plot_fixed_gt_pose(
-                        poses_gt.cpu().numpy(),
-                        aligned_poses_pred.cpu().numpy(),
-                        result_path,
-                        fig_size=(12, 10),
-                        view_angle=angle,
-                        view_ele=ele,
-                        pose_name=f"pose_fixed_gt_{angle}_{ele}.png"
-                    )
-
-    # 添加一个专门的函数来绘制固定GT的姿态图
-
-    def eval_pose_old1(self, ):
-        pipe = copy(self.pipe_cfg)
-        optim_opt = copy(self.optim_cfg)
-        result_path = os.path.dirname(
-            self.model_cfg.model_path).replace('chkpnt', 'pose')
-        os.makedirs(result_path, exist_ok=True)
-        pose_path = os.path.join(result_path, 'ep00_init.pth')
-        poses = torch.load(pose_path)
-        poses_pred = poses['poses_pred'].inverse().cpu()
-        poses_gt_c2w = poses['poses_gt'].inverse().cpu()
-        poses_gt = poses_gt_c2w[:len(poses_pred)].clone()
-
-        # 拆分为前半部分和后半部分
-        mid_idx = len(poses_pred) // 4
-
-        # 创建结果文件来保存所有评估指标
-        with open(f"{result_path}/pose_eval_split.txt", 'w') as f:
-            # 处理前半部分位姿
-            f.write("===== 前半部分位姿评估 =====\n")
-
-            poses_gt_first = poses_gt[:mid_idx]
-            poses_pred_first = poses_pred[:mid_idx]
-
-            # 对前半部分进行对齐
-            trans_gt_align_first, trans_est_align_first, _ = self.align_pose(
-                poses_gt_first[:, :3, -1].numpy(),
-                poses_pred_first[:, :3, -1].numpy()
-            )
-            poses_gt_first[:, :3, -1] = torch.from_numpy(trans_gt_align_first)
-            poses_pred_first[:, :3, -1] = torch.from_numpy(trans_est_align_first)
-
-            c2ws_est_aligned_first = align_ate_c2b_use_a2b(poses_pred_first, poses_gt_first)
-            ate_first = compute_ATE(poses_gt_first.cpu().numpy(),
-                            c2ws_est_aligned_first.cpu().numpy())
-            rpe_trans_first, rpe_rot_first = compute_rpe(
-                poses_gt_first.cpu().numpy(), c2ws_est_aligned_first.cpu().numpy())
-
-            print("前半部分位姿评估:")
-            print("{0:.3f}".format(rpe_trans_first*100),
-                '&' "{0:.3f}".format(rpe_rot_first * 180 / np.pi),
-                '&', "{0:.3f}".format(ate_first))
-
-            # 保存前半部分位姿评估指标
-            f.write("RPE_trans: {:.03f}, RPE_rot: {:.03f}, ATE: {:.03f}\n".format(
-                rpe_trans_first*100,
-                rpe_rot_first * 180 / np.pi,
-                ate_first))
-
-            # 可视化前半部分位姿
-            plot_pose(
-                poses_gt_first.cpu().numpy(),
-                c2ws_est_aligned_first.cpu().numpy(),
-                os.path.join(result_path, 'pose_first_half'),
-                fig_size=(12, 10),
-                set_limits=True,
-                pose_name="pose_vis_first_half.png"
-            )
-
-            # 处理后半部分位姿
-            f.write("\n===== 后半部分位姿评估 =====\n")
-
-            poses_gt_second = poses_gt[mid_idx:]
-            poses_pred_second = poses_pred[mid_idx:]
-
-            # 对后半部分进行对齐
-            trans_gt_align_second, trans_est_align_second, _ = self.align_pose(
-                poses_gt_second[:, :3, -1].numpy(),
-                poses_pred_second[:, :3, -1].numpy()
-            )
-            poses_gt_second[:, :3, -1] = torch.from_numpy(trans_gt_align_second)
-            poses_pred_second[:, :3, -1] = torch.from_numpy(trans_est_align_second)
-
-            c2ws_est_aligned_second = align_ate_c2b_use_a2b(poses_pred_second, poses_gt_second)
-            ate_second = compute_ATE(poses_gt_second.cpu().numpy(),
-                            c2ws_est_aligned_second.cpu().numpy())
-            rpe_trans_second, rpe_rot_second = compute_rpe(
-                poses_gt_second.cpu().numpy(), c2ws_est_aligned_second.cpu().numpy())
-
-            print("后半部分位姿评估:")
-            print("{0:.3f}".format(rpe_trans_second*100),
-                '&' "{0:.3f}".format(rpe_rot_second * 180 / np.pi),
-                '&', "{0:.3f}".format(ate_second))
-
-            # 保存后半部分位姿评估指标
-            f.write("RPE_trans: {:.03f}, RPE_rot: {:.03f}, ATE: {:.03f}\n".format(
-                rpe_trans_second*100,
-                rpe_rot_second * 180 / np.pi,
-                ate_second))
-
-            # 可视化后半部分位姿
-            plot_pose(
-                poses_gt_second.cpu().numpy(),
-                c2ws_est_aligned_second.cpu().numpy(),
-                os.path.join(result_path, 'pose_second_half'),
-                fig_size=(12, 10),
-                set_limits=True,
-                pose_name="pose_vis_second_half.png"
-            )
-
-            # 全部位姿评估（原代码功能）
-            f.write("\n===== 全部位姿评估 =====\n")
-
-            # 对所有位姿进行对齐
-            trans_gt_align, trans_est_align, _ = self.align_pose(poses_gt[:, :3, -1].numpy(),
-                                                            poses_pred[:, :3, -1].numpy())
-            poses_gt[:, :3, -1] = torch.from_numpy(trans_gt_align)
-            poses_pred[:, :3, -1] = torch.from_numpy(trans_est_align)
-
-            c2ws_est_aligned = align_ate_c2b_use_a2b(poses_pred, poses_gt)
-            ate = compute_ATE(poses_gt.cpu().numpy(),
-                        c2ws_est_aligned.cpu().numpy())
-            rpe_trans, rpe_rot = compute_rpe(
-                poses_gt.cpu().numpy(), c2ws_est_aligned.cpu().numpy())
-
-            print("全部位姿评估:")
-            print("{0:.3f}".format(rpe_trans*1000),
-                '&' "{0:.3f}".format(rpe_rot * 180 / np.pi),
-                '&', "{0:.3f}".format(ate*1000))
-
-            # 保存全部位姿评估指标
-            f.write("RPE_trans: {:.03f}, RPE_rot: {:.03f}, ATE: {:.03f}\n".format(
-                rpe_trans*100,
-                rpe_rot * 180 / np.pi,
-                ate))
-
-            # 可视化全部位姿
-            angles = [30, 70, 45]  # 三个不同的观察角度
-            eles = [30, 15, 0]
-            for angle in angles:
-                for ele in eles:
-                    plot_pose(
-                        poses_gt.cpu().numpy(),
-                        c2ws_est_aligned.cpu().numpy(),
-                        os.path.join(result_path, f'pose_all_{angle}'),
-                        fig_size=(12, 10),
-                        set_limits=True,
-                        pose_name=f"pose_vis_all_{angle}_{ele}.png",
-                        view_angle=angle,
-                        view_ele=ele
-                    )
-    def eval_pose_old(self, ):
-        pipe = copy(self.pipe_cfg)
-        optim_opt = copy(self.optim_cfg)
-        result_path = os.path.dirname(
-            self.model_cfg.model_path).replace('chkpnt', 'pose')
-        os.makedirs(result_path, exist_ok=True)
-        pose_path = os.path.join(result_path, 'ep00_init.pth')
-        poses = torch.load(pose_path)
-        poses_pred = poses['poses_pred'].inverse().cpu()
-        poses_gt_c2w = poses['poses_gt'].inverse().cpu()
-        poses_gt = poses_gt_c2w[:len(poses_pred)].clone()
-        # align scale first (we do this because scale differennt a lot)
-        trans_gt_align, trans_est_align, _ = self.align_pose(poses_gt[:, :3, -1].numpy(),
-                                                             poses_pred[:, :3, -1].numpy())
-        poses_gt[:, :3, -1] = torch.from_numpy(trans_gt_align)
-        poses_pred[:, :3, -1] = torch.from_numpy(trans_est_align)
-
-        c2ws_est_aligned = align_ate_c2b_use_a2b(poses_pred, poses_gt)
-        ate = compute_ATE(poses_gt.cpu().numpy(),
-                          c2ws_est_aligned.cpu().numpy())
-        rpe_trans, rpe_rot = compute_rpe(
-            poses_gt.cpu().numpy(), c2ws_est_aligned.cpu().numpy())
-        print("{0:.3f}".format(rpe_trans*100),
-              '&' "{0:.3f}".format(rpe_rot * 180 / np.pi),
-              '&', "{0:.3f}".format(ate))
-        plot_pose(poses_gt.cpu().numpy(),
-                  c2ws_est_aligned.cpu().numpy(),
-                  pose_path,
-                  fig_size=(12, 10),
-                  set_limits=True,
-                  pose_name="pose_vis.png")
-
-        with open(f"{result_path}/pose_eval.txt", 'w') as f:
-            f.write("RPE_trans: {:.03f}, RPE_rot: {:.03f}, ATE: {:.03f}".format(
-                rpe_trans*100,
-                rpe_rot * 180 / np.pi,
-                ate))
-            f.close()
-
-    def align_pose(self, pose1, pose2):
-        mtx1 = np.array(pose1, dtype=np.double, copy=True)
-        mtx2 = np.array(pose2, dtype=np.double, copy=True)
-
-        if mtx1.ndim != 2 or mtx2.ndim != 2:
-            raise ValueError("Input matrices must be two-dimensional")
-        if mtx1.shape != mtx2.shape:
-            raise ValueError("Input matrices must be of same shape")
-        if mtx1.size == 0:
-            raise ValueError("Input matrices must be >0 rows and >0 cols")
-
-        # translate all the data to the origin
-        mtx1 -= np.mean(mtx1, 0)
-        mtx2 -= np.mean(mtx2, 0)
-
-        norm1 = np.linalg.norm(mtx1)
-        norm2 = np.linalg.norm(mtx2)
-
-        if norm1 == 0 or norm2 == 0:
-            raise ValueError("Input matrices must contain >1 unique points")
-
-        # change scaling of data (in rows) such that trace(mtx*mtx') = 1
-        mtx1 /= norm1
-        mtx2 /= norm2
-
-        # transform mtx2 to minimize disparity
-        R, s = scipy.linalg.orthogonal_procrustes(mtx1, mtx2)
-        mtx2 = mtx2 * s
-
-        return mtx1, mtx2, R
-
-    def render_nvs(self, traj_opt='bspline', N_novel_imgs=120, degree=100):
-        result_path = os.path.dirname(
-            self.model_cfg.model_path).replace('chkpnt', 'nvs')
-        os.makedirs(result_path, exist_ok=True)
-        self.gs_render.gaussians.restore(
-            torch.load(self.model_cfg.model_path), self.optim_cfg)
-        pose_dict_train = torch.load(
-            self.model_cfg.model_path.replace('chkpnt', 'pose'))
-        poses_pred_w2c_train = pose_dict_train['poses_pred'].cpu()
-        if traj_opt == 'bspline':
-            i_train = self.i_train
-            if "co3d" in self.model_cfg.source_path:
-                poses_pred_w2c_train = poses_pred_w2c_train[:100]
-                i_train = self.i_train[:100]
-            c2ws = interp_poses_bspline(poses_pred_w2c_train.inverse(), N_novel_imgs,
-                                        i_train, degree)
-            w2cs = c2ws.inverse()
-
-        self.gs_render.gaussians.rotate_seq = False
-        render_dir = f"{result_path}/{traj_opt}"
-        os.makedirs(render_dir, exist_ok=True)
-        for fidx, pose in enumerate(w2cs):
-            viewpoint_cam = self.load_viewpoint_cam(10,
-                                                    pose=pose,
-                                                    )
-            render_dict = self.gs_render.render(viewpoint_cam,
-                                                compute_cov3D_python=False,
-                                                convert_SHs_python=False)
-            self.visualize(render_dict,
-                           f"{render_dir}/img_out/{fidx:04d}.png",
-                           save_ply=False)
-
-        imgs = []
-        for img in sorted(glob.glob(os.path.join(render_dir, "img_out", "*.png"))):
-            if "depth" in img:
-                continue
-            rgb = cv2.imread(img)
-            rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
-            depth = cv2.imread(img.replace(".png", "_depth.png"))
-            depth = cv2.cvtColor(depth, cv2.COLOR_BGR2RGB)
-            rgb = np.hstack([rgb, depth])
-            imgs.append(rgb)
-
-        imgs = np.stack(imgs, axis=0)
-
-        video_out_dir = os.path.join(render_dir, 'video_out')
-        if not os.path.exists(video_out_dir):
-            os.makedirs(video_out_dir)
-        imageio.mimwrite(os.path.join(
-            video_out_dir, f'{self.category}_{self.seq_name}_ours.mp4'), imgs, fps=30, quality=9)
+        print(
+            f"Reconstruction: PSNR {reconstruction['psnr']:.3f}, "
+            f"SSIM {reconstruction['ssim']:.3f}, "
+            f"LPIPS {reconstruction['lpips']:.3f}"
+        )
+        print(f"Rendering FPS: {rendering_fps:.2f}")
+        print(f"Video: {video_path}")
+        print(f"Report: {report_path}")
 
     def save_model(self, epoch):
         pass
@@ -1757,25 +1258,8 @@ class CFGaussianTrainer(GaussianTrainer):
         loss_dict = self.loss_func(image, gt_image, **kwargs)
         return loss_dict
 
-    def visualize(self, render_pkg, filename, gt_image=None, gt_depth=None, save_ply=False):
+    def visualize(self, render_pkg, filename, gt_image=None, save_ply=False):
         os.makedirs(os.path.dirname(filename), exist_ok=True)
-        if "depth" in render_pkg:
-            rend_depth = render_pkg["depth"].detach().cpu().numpy()
-            if rend_depth.ndim > 2:
-                rend_depth = rend_depth.squeeze()
-            # normalized_depth = np.clip((rend_depth - vmin) / (vmax - vmin), 0, 1)
-            save_depth = np.clip(rend_depth*6553.5, 0, 65535)
-            # print('----',save_depth.max()) 10000
-            # rend_depth = Image.fromarray(
-            #     colorize(render_pkg["depth"].detach().cpu().numpy(),
-            #              cmap='magma_r')).convert("RGB")
-            # if gt_depth is not None:
-            #     gt_depth = Image.fromarray(
-            #         colorize(gt_depth.detach().cpu().numpy(),
-            #                  cmap='magma_r')).convert("RGB")
-            #     rend_depth = Image.fromarray(np.hstack([np.asarray(gt_depth),
-            #                                             np.asarray(rend_depth)]))
-            Image.fromarray(np.uint16(save_depth)).save(filename.replace(".png", "_depth.png"))
         if "acc" in render_pkg:
             rend_acc = Image.fromarray(
                 colorize(render_pkg["acc"].detach().cpu().numpy(),
