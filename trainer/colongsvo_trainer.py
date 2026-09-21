@@ -9,58 +9,81 @@
 import os
 from tqdm import tqdm
 from random import randint
-import math
 import numpy as np
 import random
-from collections import defaultdict, OrderedDict
+from collections import OrderedDict
 import json
-import gzip
 import torch
-import torch.nn.functional as F
-from torchvision import io
 from PIL import Image
-from einops import rearrange
-import pickle
-import imageio
-import glob
+import imageio.v2 as imageio
 import cv2
 import open3d as o3d
 
-from arguments import ModelParams, PipelineParams, OptimizationParams
-from gaussian_renderer import render
 from scene.gaussian_model_colongsvo import ColonGSVORenderer as GS_Render
 
-from utils.graphics_utils import BasicPointCloud, focal2fov, procrustes
-from scene.cameras import Camera
 from utils.loss_utils import l1_loss, ssim
 from lpipsPyTorch import lpips
 from utils.image_utils import psnr, colorize, align_brightness_with_flow
 from utils.mask_utils import compute_epipolar_loss, adaptive_thresholding, generate_intensity_diff_mask, save_masks_as_png
-from kornia.geometry.depth import depth_to_3d, depth_to_3d_v2, depth_to_normals
-from kornia.geometry.camera import project_points
 import ptlflow
 from ptlflow.utils.io_adapter import IOAdapter
 import time
 from .trainer import GaussianTrainer
-from .losses import Loss, compute_scale_and_shift
+from .losses import Loss
 from .timing_utils import TimingStats
 
 from copy import copy
 
-# def attach_debugger():
-#     import debugpy
-#     debugpy.listen(5678)
-#     print("Waiting for Debuger to Attach on Port 5678...")
-#     debugpy.wait_for_client()
-#     print("Attached!")
-# attach_debugger()
 
-def contruct_pose(poses):
-    n_trgt = poses.shape[0]
-    for i in range(n_trgt-1, 0, -1):
-        poses = torch.cat(
-            (poses[:i], poses[[i-1]]@poses[i:]), 0)
-    return poses
+def write_reconstruction_video(frame_paths, video_path, fps):
+    """Write H.264 when available, with an OpenCV MP4 fallback."""
+    try:
+        with imageio.get_writer(
+            video_path,
+            format="FFMPEG",
+            fps=fps,
+            codec="libx264",
+            quality=8,
+            pixelformat="yuv420p",
+            macro_block_size=None,
+            output_params=["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"],
+        ) as video:
+            for frame_path in frame_paths:
+                video.append_data(imageio.imread(frame_path))
+        return
+    except ImportError:
+        pass
+
+    first_frame = cv2.imread(frame_paths[0])
+    if first_frame is None:
+        raise RuntimeError(f"Failed to read video frame: {frame_paths[0]}")
+    height, width = first_frame.shape[:2]
+    output_size = (width + width % 2, height + height % 2)
+    writer = cv2.VideoWriter(
+        video_path,
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        output_size,
+    )
+    if not writer.isOpened():
+        raise RuntimeError("No MP4 encoder is available; install imageio-ffmpeg")
+    try:
+        for frame_path in frame_paths:
+            frame = cv2.imread(frame_path)
+            if frame is None:
+                raise RuntimeError(f"Failed to read video frame: {frame_path}")
+            if frame.shape[1] != output_size[0] or frame.shape[0] != output_size[1]:
+                frame = cv2.copyMakeBorder(
+                    frame,
+                    0,
+                    output_size[1] - frame.shape[0],
+                    0,
+                    output_size[0] - frame.shape[1],
+                    cv2.BORDER_CONSTANT,
+                )
+            writer.write(frame)
+    finally:
+        writer.release()
 
 
 class ColonGSVOTrainer(GaussianTrainer):
@@ -103,6 +126,21 @@ class ColonGSVOTrainer(GaussianTrainer):
                 ) from e
     def setup_losses(self):
         self.loss_func = Loss(self.optim_cfg)
+
+    def save_run_config(self, output_dir, pipe_cfg=None, optim_cfg=None):
+        """Persist the effective arguments and runtime versions for replay."""
+        config = {
+            "model": vars(self.model_cfg),
+            "pipeline": vars(pipe_cfg or self.pipe_cfg),
+            "optimization": vars(optim_cfg or self.optim_cfg),
+            "runtime": {
+                "torch": torch.__version__,
+                "cuda": torch.version.cuda,
+            },
+        }
+        os.makedirs(output_dir, exist_ok=True)
+        with open(os.path.join(output_dir, "run_config.json"), "w", encoding="utf-8") as config_file:
+            json.dump(config, config_file, indent=2, sort_keys=True, default=str)
 
     def compute_flow_between_views(self, image1, image2):
         """使用PTLFlow计算两个图像之间的光流"""
@@ -871,25 +909,6 @@ class ColonGSVOTrainer(GaussianTrainer):
 
         return pcd, local_model_params
 
-    def create_pcd_from_render(self, render_dict, viewpoint_cam):
-        intrinsics = torch.from_numpy(viewpoint_cam.intrinsics).float().cuda()
-        depth = render_dict["depth"].squeeze()
-        image = render_dict["image"]
-        pts = depth_to_3d(depth[None, None],
-                          intrinsics[None],
-                          normalize_points=False)
-        points = pts.squeeze().permute(1, 2, 0).detach().cpu().reshape(-1, 3).numpy()
-        colors = image.permute(1, 2, 0).detach().cpu().reshape(-1, 3).numpy()
-        pcd_data = o3d.geometry.PointCloud()
-        pcd_data.points = o3d.utility.Vector3dVector(points)
-        pcd_data.colors = o3d.utility.Vector3dVector(colors)
-        pcd_data = pcd_data.farthest_point_down_sample(num_samples=30_000)
-        colors = np.asarray(pcd_data.colors, dtype=np.float32)
-        points = np.asarray(pcd_data.points, dtype=np.float32)
-        normals = np.asarray(pcd_data.normals, dtype=np.float32)
-        pcd = BasicPointCloud(points, colors, normals)
-        return pcd
-
     def train_from_progressive(self, ):
         pipe = copy(self.pipe_cfg)
         self.single_step = 300 # 300 for faster training; 500 for better results
@@ -900,7 +919,6 @@ class ColonGSVOTrainer(GaussianTrainer):
         self.optim_cfg.opacity_reset_interval = num_iterations // 10
         self.optim_cfg.densify_until_iter = num_iterations
         self.optim_cfg.reset_until_iter = int(num_iterations * 0.8)
-        self.optim_cfg.densify_from_iter = 1000
         self.optim_cfg.densify_from_iter = self.single_step
 
 
@@ -909,9 +927,9 @@ class ColonGSVOTrainer(GaussianTrainer):
         else:
             expname = pipe.expname
         pipe.convert_SHs_python = True
-        optim_opt = copy(self.optim_cfg)
         result_path = f"output/{expname}/{self.seq_name}_{self.model_cfg.start_cam}_{self.model_cfg.end_cam}"
         os.makedirs(result_path, exist_ok=True)
+        self.save_run_config(result_path, pipe, self.optim_cfg)
 
         # 初始化时间统计器
         self.timing_stats = TimingStats(output_dir=result_path)
@@ -919,33 +937,14 @@ class ColonGSVOTrainer(GaussianTrainer):
         print("Time measurement enabled (EndoGSLAM compatible format)")
         print("="*70 + "\n")
 
-        pose_dict = dict()
-        poses_gt = []
-        for seq_data in self.data:
-            if self.data_type == "co3d":
-                R, t, _, _, _ = self.load_camera(seq_data)
-            else:
-                try:
-                    R = seq_data.R.transpose()
-                    t = seq_data.T
-                except:
-                    R = np.eye(3)
-                    t = np.zeros(3)
-            pose = np.eye(4)
-            pose[:3, :3] = R
-            pose[:3, 3] = t
-            poses_gt.append(torch.from_numpy(pose))
-        pose_dict["poses_gt"] = torch.stack(poses_gt)
         max_frame = self.seq_len
         start_frame = 1
         end_frame = max_frame
 
         os.makedirs(f"{result_path}/pose", exist_ok=True)
-        os.makedirs(f"{result_path}/mesh", exist_ok=True)
 
-        num_eppch = 1
-        reverse = False
-        for epoch in range(num_eppch):
+        num_epochs = 1
+        for epoch in range(num_epochs):
             # 计时：初始化两帧
             self.timing_stats.start_init()
             gauss_params = self.init_two_view(
@@ -953,19 +952,14 @@ class ColonGSVOTrainer(GaussianTrainer):
             self.timing_stats.stop_init()
 
             self.global_iteration = 0
-            optim_opt = copy(self.optim_cfg)
             self.gs_render.gaussians.rotate_seq = True
             self.gs_render.gaussians.training_setup(self.optim_cfg,
                                                     fit_pose=True,)
-            self.match_results = OrderedDict()
             for fidx in range(start_frame, end_frame):
                 # 开始帧计时
                 self.timing_stats.start_frame(fidx)
 
-                # pcd_new, local_gauss_params = self.add_view(
-                #     None, fidx, fidx-1, pipe, optim_opt, reverse=reverse)
-                pcd_new, local_gauss_params = self.add_view_v2(
-                    fidx, fidx-1)
+                self.add_view_v2(fidx, fidx-1)
                 self.gs_render.gaussians.rotate_seq = False
                 viewpoint_cam = self.load_viewpoint_cam(fidx,
                                                         pose=self.gs_render.gaussians.get_RT(
@@ -1002,7 +996,7 @@ class ColonGSVOTrainer(GaussianTrainer):
 
             with torch.no_grad():
                 psnr_test = 0.0
-                pose_dict["poses_pred"] = []
+                poses_pred = []
                 self.render_depth = OrderedDict()
                 self.gs_render.gaussians.rotate_seq = False
                 self.gs_render.gaussians.rotate_xyz = False
@@ -1043,13 +1037,12 @@ class ColonGSVOTrainer(GaussianTrainer):
 
                 for idx in range(self.seq_len):
                     pose = self.gs_render.gaussians.get_RT(idx)
-                    pose_dict["poses_pred"].append(pose.detach().cpu())
+                    poses_pred.append(pose.detach().cpu())
 
-            pose_dict["poses_pred"] = torch.stack(pose_dict["poses_pred"])
-            pose_dict["poses_gt"] = torch.stack(poses_gt)
-            pose_dict["match_results"] = self.match_results
             torch.save(
-                pose_dict, f"{result_path}/pose/ep{epoch:02d}_init.pth")
+                {"poses_pred": torch.stack(poses_pred)},
+                f"{result_path}/pose/ep{epoch:02d}_init.pth",
+            )
             os.makedirs(f"{result_path}/chkpnt", exist_ok=True)
             torch.save(self.gs_render.gaussians.capture(),
                         f"{result_path}/chkpnt/ep{epoch:02d}_init.pth")
@@ -1085,6 +1078,7 @@ class ColonGSVOTrainer(GaussianTrainer):
         ).replace("chkpnt", "test")
         frame_dir = os.path.join(result_path, "frames")
         os.makedirs(frame_dir, exist_ok=True)
+        self.save_run_config(result_path, pipe, optim_opt)
 
         self.gs_render.gaussians.restore(
             torch.load(self.model_cfg.model_path), self.optim_cfg
@@ -1187,17 +1181,9 @@ class ColonGSVOTrainer(GaussianTrainer):
         rendering_fps = self.seq_len / rendering_time
 
         video_path = os.path.join(result_path, "reconstruction.mp4")
-        with imageio.get_writer(
-            video_path,
-            fps=self.model_cfg.video_fps,
-            codec="libx264",
-            quality=8,
-            pixelformat="yuv420p",
-            macro_block_size=None,
-            output_params=["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"],
-        ) as video:
-            for frame_path in frame_paths:
-                video.append_data(imageio.imread(frame_path))
+        write_reconstruction_video(
+            frame_paths, video_path, self.model_cfg.video_fps
+        )
 
         report = {
             "reconstruction": {
@@ -1232,9 +1218,6 @@ class ColonGSVOTrainer(GaussianTrainer):
         print(f"Rendering FPS: {rendering_fps:.2f}")
         print(f"Video: {video_path}")
         print(f"Report: {report_path}")
-
-    def save_model(self, epoch):
-        pass
 
     def compute_loss(self,
                      render_dict,
@@ -1285,83 +1268,3 @@ class ColonGSVOTrainer(GaussianTrainer):
             pcd_data.colors = o3d.utility.Vector3dVector(np.ones_like(points))
             o3d.io.write_point_cloud(
                 filename.replace('.png', '.ply'), pcd_data)
-
-
-    def construct_point(self, gs_model, poses, iteration, result_path, stop_frame=-1):
-        volume = o3d.pipelines.integration.ScalableTSDFVolume(
-            voxel_length=0.01,
-            sdf_trunc=3 * 0.01,
-            color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
-        )
-        pipe = self.pipe_cfg
-        optim_opt = self.optim_cfg
-        pipe.convert_SHs_python = True
-        if poses is None:
-            poses = torch.stack(
-                [gs_model.gaussians.get_RT(idx).detach().cpu()
-                 for idx in range(self.seq_len)])
-
-        self.gs_render.gaussians.rotate_seq = False
-        stop_frame = len(poses) if stop_frame == -1 else stop_frame
-        with torch.no_grad():
-            progress_bar = tqdm(range(self.seq_len),
-                                desc="Reconstructing point cloud")
-            for idx in range(len(poses)):
-                if idx > stop_frame:
-                    break
-
-                viewpoint_cam = self.load_viewpoint_cam(
-                    idx, pose=poses[idx], load_depth=True)
-                # if idx not in self.render_depth:
-                render_dict = gs_model.render(
-                    viewpoint_cam,
-                    compute_cov3D_python=pipe.compute_cov3D_python,
-                    convert_SHs_python=pipe.convert_SHs_python)
-                render_depth = render_dict['depth'].detach().squeeze()
-
-                rgb = viewpoint_cam.original_image.cuda().permute(1, 2, 0).detach().cpu().numpy()
-                rgb = (rgb * 255).astype(np.uint8)
-
-                depth = render_depth.detach().cpu().numpy()
-
-
-                H, W = depth.shape
-                intrinsic = viewpoint_cam.intrinsics
-                fx, fy, cx, cy = intrinsic[0, 0], intrinsic[1, 1], intrinsic[0, 2], intrinsic[1, 2]
-
-                rgb = o3d.geometry.Image(rgb)
-                depth = o3d.geometry.Image(depth)
-                rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-                    rgb, depth, depth_scale=1.0, depth_trunc=10.0, convert_rgb_to_intensity=False
-                )
-                intrinsic = o3d.camera.PinholeCameraIntrinsic(
-                    width=W, height=H, fx=fx,  fy=fy, cx=cx, cy=cy)
-                # pose = self.gs_render.gaussians.get_RT(idx).detach().cpu().numpy()
-                volume.integrate(rgbd, intrinsic, poses[idx])
-                progress_bar.update(1)
-        progress_bar.close()
-
-        self.gs_render.gaussians.rotate_seq = True
-        mesh = volume.extract_triangle_mesh()
-        mesh.remove_duplicated_triangles()
-        mesh.remove_duplicated_vertices()
-        mesh.compute_vertex_normals()
-        o3d.io.write_triangle_mesh(
-            f"{result_path}/{self.gs_render.rot_type}_{iteration:06d}.ply", mesh)
-
-        points = np.asarray(mesh.vertices, dtype=np.float32)
-        colors = np.asarray(mesh.vertex_colors)
-        normals = np.asarray(mesh.vertex_normals)
-        pcd_data = o3d.geometry.PointCloud()
-        pcd_data.points = o3d.utility.Vector3dVector(points)
-        pcd_data.colors = o3d.utility.Vector3dVector(colors)
-        pcd_data.normals = o3d.utility.Vector3dVector(normals)
-
-        pcd_data = pcd_data.voxel_down_sample(voxel_size=0.01)
-        o3d.io.write_point_cloud(
-            f"{result_path}/{self.gs_render.rot_type}_{iteration:06d}.ply", pcd_data)
-        points = np.asarray(pcd_data.points)
-        colors = np.asarray(pcd_data.colors)
-        normals = np.asarray(pcd_data.normals)
-        pcd = BasicPointCloud(points=points, colors=colors, normals=normals)
-        return pcd

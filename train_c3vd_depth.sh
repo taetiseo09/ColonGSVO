@@ -15,6 +15,8 @@ EXPNAME="colongsvo_demo"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 INTENSITY_THRESHOLD=0.5
 VIDEO_FPS=10
+EVAL_EPOCHS=200
+SEED=0
 EVAL_ONLY=0
 SKIP_EVAL=0
 DRY_RUN=0
@@ -41,6 +43,8 @@ Options:
   --python PATH         Python executable (default: python).
   --intensity FLOAT     Intensity mask threshold (default: 0.5).
   --video-fps N         Output reconstruction video FPS (default: 10).
+  --eval-epochs N       Evaluation camera-optimization epochs (default: 200).
+  --seed N              Random seed (default: 0).
   --eval-only           Reuse an existing checkpoint and only evaluate RGB
                         reconstruction quality and rendering FPS.
   --skip-eval           Train without reconstruction evaluation.
@@ -65,6 +69,8 @@ while (($#)); do
         --python) PYTHON_BIN="$2"; shift 2 ;;
         --intensity) INTENSITY_THRESHOLD="$2"; shift 2 ;;
         --video-fps) VIDEO_FPS="$2"; shift 2 ;;
+        --eval-epochs) EVAL_EPOCHS="$2"; shift 2 ;;
+        --seed) SEED="$2"; shift 2 ;;
         --eval-only) EVAL_ONLY=1; shift ;;
         --skip-eval) SKIP_EVAL=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
@@ -77,8 +83,8 @@ if [[ -z "$DATA_ROOT" ]]; then
     echo "Error: --data-root or C3VD_DATA_ROOT is required." >&2
     exit 2
 fi
-if ! [[ "$START_CAM" =~ ^[0-9]+$ && "$END_CAM" =~ ^[0-9]+$ && "$SPLIT_RATE" =~ ^[1-9][0-9]*$ && "$VIDEO_FPS" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Error: --start/--end must be non-negative integers; --split and --video-fps must be positive." >&2
+if ! [[ "$START_CAM" =~ ^[0-9]+$ && "$END_CAM" =~ ^[0-9]+$ && "$SPLIT_RATE" =~ ^[1-9][0-9]*$ && "$VIDEO_FPS" =~ ^[1-9][0-9]*$ && "$EVAL_EPOCHS" =~ ^[1-9][0-9]*$ && "$SEED" =~ ^[0-9]+$ ]]; then
+    echo "Error: --start/--end/--seed must be non-negative integers; --split/--video-fps/--eval-epochs must be positive." >&2
     exit 2
 fi
 if ((END_CAM != 0 && END_CAM <= START_CAM)); then
@@ -119,6 +125,8 @@ common_args=(
     --inverse_depth
     --intensity_threshold "$INTENSITY_THRESHOLD"
     --video_fps "$VIDEO_FPS"
+    --eval_reconstruction_epochs "$EVAL_EPOCHS"
+    --seed "$SEED"
 )
 
 echo "Scene:       $SCENE"

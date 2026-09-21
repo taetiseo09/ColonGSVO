@@ -87,6 +87,7 @@ class ModelParams(ParamGroup):
         self.local_depth_scale: float = 1.0
         self.local_depth_scale_size: int = 100
         self.video_fps = 10
+        self.seed = 0
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

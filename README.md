@@ -104,12 +104,14 @@ The default output is:
 ```text
 output/colongsvo_demo/<scene>_<start>_<end>/
 ├── chkpnt/ep00_init.pth
+├── run_config.json
 ├── train/
 └── test/
     ├── frames/*.png
     ├── reconstruction.mp4
     ├── report.json
-    └── report.md
+    ├── report.md
+    └── run_config.json
 ```
 
 Use the same `--scene`, `--start`, `--end`, `--split`, and `--expname` values for training and evaluation. The demo script enforces this automatically.
@@ -161,26 +163,15 @@ The reported FPS measures only synchronized Gaussian rendering. Metric computati
 
 ## Reproducibility notes
 
+- All entry points default to `--seed 0`. The runner seeds Python, NumPy, and
+  PyTorch and disables cuDNN benchmarking before loading the dataset or model.
+- Every run writes `run_config.json` beside its generated outputs so the exact
+  model, pipeline, and optimization arguments can be reused.
 - The C3VD demo uses `DPT_Hybrid` through `torch.hub` and UniMatch through PTLFlow (`mix` checkpoint).
 - Generated weights, visualizations, data, logs, and caches are ignored by Git.
 - `DepthAnything/` and `RAFT/` are not vendored. The released C3VD demo does not depend on those local checkouts.
 - Monocular depth remains part of training initialization, but no depth metric or depth image is produced by evaluation.
 - Pose estimates remain an internal reconstruction input, but no pose metric or pose report is produced.
-
-## Related work and citation
-
-This work is derived from COLMAP-Free 3D Gaussian Splatting. Please cite the upstream paper when using the code:
-
-```bibtex
-@InProceedings{Fu_2024_CVPR,
-  author    = {Fu, Yang and Liu, Sifei and Kulkarni, Amey and Kautz, Jan and Efros, Alexei A. and Wang, Xiaolong},
-  title     = {COLMAP-Free 3D Gaussian Splatting},
-  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
-  month     = {June},
-  year      = {2024},
-  pages     = {20796--20805}
-}
-```
 
 ## License
 

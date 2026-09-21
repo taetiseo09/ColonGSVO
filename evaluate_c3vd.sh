@@ -12,7 +12,9 @@ END_CAM=300
 SPLIT_RATE=8
 IMAGE_DIR="color"
 VIDEO_FPS=10
+EVAL_EPOCHS=200
 PYTHON_BIN="${PYTHON_BIN:-python}"
+SEED=0
 
 usage() {
     cat <<'EOF'
@@ -32,7 +34,9 @@ Options:
   --split N              Test split interval (default: 8).
   --image-dir NAME       RGB directory inside the scene (default: color).
   --video-fps N          Output MP4 FPS (default: 10).
+  --eval-epochs N        Camera-optimization epochs (default: 200).
   --python PATH          Python executable (default: python).
+  --seed N               Random seed (default: 0).
   -h, --help             Show this help.
 
 Outputs are written beside the checkpoint under test/:
@@ -50,7 +54,9 @@ while (($#)); do
         --split) SPLIT_RATE="$2"; shift 2 ;;
         --image-dir) IMAGE_DIR="$2"; shift 2 ;;
         --video-fps) VIDEO_FPS="$2"; shift 2 ;;
+        --eval-epochs) EVAL_EPOCHS="$2"; shift 2 ;;
         --python) PYTHON_BIN="$2"; shift 2 ;;
+        --seed) SEED="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -68,8 +74,8 @@ if [[ ! -f "$MODEL_PATH" ]]; then
     echo "Error: checkpoint not found: $MODEL_PATH" >&2
     exit 1
 fi
-if ! [[ "$START_CAM" =~ ^[0-9]+$ && "$END_CAM" =~ ^[0-9]+$ && "$SPLIT_RATE" =~ ^[1-9][0-9]*$ && "$VIDEO_FPS" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Error: frame values must be non-negative; split/video FPS must be positive." >&2
+if ! [[ "$START_CAM" =~ ^[0-9]+$ && "$END_CAM" =~ ^[0-9]+$ && "$SPLIT_RATE" =~ ^[1-9][0-9]*$ && "$VIDEO_FPS" =~ ^[1-9][0-9]*$ && "$EVAL_EPOCHS" =~ ^[1-9][0-9]*$ && "$SEED" =~ ^[0-9]+$ ]]; then
+    echo "Error: frame values and seed must be non-negative; split/video FPS/eval epochs must be positive." >&2
     exit 2
 fi
 
@@ -82,4 +88,6 @@ CUDA_VISIBLE_DEVICES="$GPU_ID" "$PYTHON_BIN" run_colongsvo.py \
     --start_cam "$START_CAM" \
     --end_cam "$END_CAM" \
     --train_test_split "$SPLIT_RATE" \
-    --video_fps "$VIDEO_FPS"
+    --video_fps "$VIDEO_FPS" \
+    --eval_reconstruction_epochs "$EVAL_EPOCHS" \
+    --seed "$SEED"

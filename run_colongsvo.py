@@ -7,12 +7,25 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import sys
+import random
 from argparse import ArgumentParser
+import numpy as np
+import torch
 
 from trainer.colongsvo_trainer import ColonGSVOTrainer
 from arguments import ModelParams, PipelineParams, OptimizationParams
 
 from datetime import datetime
+
+
+def set_random_seed(seed):
+    """Seed all random number generators used by the training pipeline."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
 
 
 if __name__ == "__main__":
@@ -29,6 +42,9 @@ if __name__ == "__main__":
         parser.error("--source/-s is required")
     if model_cfg.end_cam and model_cfg.end_cam <= model_cfg.start_cam:
         parser.error("--end_cam must be greater than --start_cam, or 0 to use all frames")
+
+    set_random_seed(model_cfg.seed)
+    print(f"Random seed: {model_cfg.seed}")
 
     print("="*70)
     print("Loss Configuration:")
