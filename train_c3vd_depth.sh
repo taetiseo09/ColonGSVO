@@ -11,7 +11,7 @@ START_CAM=0
 END_CAM=300
 SPLIT_RATE=4
 IMAGE_DIR="color"
-EXPNAME="c3vd_inverse_depth_demo"
+EXPNAME="colongsvo_demo"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 INTENSITY_THRESHOLD=0.5
 VIDEO_FPS=10
@@ -127,7 +127,7 @@ echo "Frame range: [$START_CAM, $END_CAM)"
 echo "Output:      $OUTPUT_PATH"
 
 if [[ "$EVAL_ONLY" -eq 0 ]]; then
-    run_command "$PYTHON_BIN" run_cf3dgs.py \
+    run_command "$PYTHON_BIN" run_colongsvo.py \
         "${common_args[@]}" \
         --mode train \
         --use_flow_loss \
@@ -142,7 +142,7 @@ if [[ "$DRY_RUN" -eq 0 && ! -f "$MODEL_PATH" ]]; then
     exit 1
 fi
 
-run_command "$PYTHON_BIN" run_cf3dgs.py \
+run_command "$PYTHON_BIN" run_colongsvo.py \
     "${common_args[@]}" \
     --mode eval_reconstruction \
     --model_path "$MODEL_PATH"

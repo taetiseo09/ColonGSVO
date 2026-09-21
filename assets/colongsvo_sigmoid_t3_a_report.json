@@ -4,7 +4,7 @@
     "psnr": 31.681,
     "ssim": 0.853,
     "lpips": 0.297,
-    "video": "c3vd_sigmoid_t3_a_reconstruction.mp4"
+    "video": "colongsvo_sigmoid_t3_a_reconstruction.mp4"
   },
   "rendering": {
     "fps": 299.21

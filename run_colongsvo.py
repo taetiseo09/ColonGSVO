@@ -9,7 +9,7 @@
 import sys
 from argparse import ArgumentParser
 
-from trainer.cf3dgs_trainer import CFGaussianTrainer
+from trainer.colongsvo_trainer import ColonGSVOTrainer
 from arguments import ModelParams, PipelineParams, OptimizationParams
 
 from datetime import datetime
@@ -48,7 +48,7 @@ if __name__ == "__main__":
         print('Using flow loss')
 
     data_path = model_cfg.source_path
-    trainer = CFGaussianTrainer(data_path, model_cfg, pipe_cfg, optim_cfg)
+    trainer = ColonGSVOTrainer(data_path, model_cfg, pipe_cfg, optim_cfg)
     start_time = datetime.now()
     if model_cfg.mode == "train":
         trainer.train_from_progressive()

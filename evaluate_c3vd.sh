@@ -73,7 +73,7 @@ if ! [[ "$START_CAM" =~ ^[0-9]+$ && "$END_CAM" =~ ^[0-9]+$ && "$SPLIT_RATE" =~ ^
     exit 2
 fi
 
-CUDA_VISIBLE_DEVICES="$GPU_ID" "$PYTHON_BIN" run_cf3dgs.py \
+CUDA_VISIBLE_DEVICES="$GPU_ID" "$PYTHON_BIN" run_colongsvo.py \
     --source "$SOURCE_PATH" \
     --mode eval_reconstruction \
     --data_type tanks \

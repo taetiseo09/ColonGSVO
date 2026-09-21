@@ -1,6 +1,6 @@
-# CF-3DGS for C3VD
+# ColonGSVO
 
-This repository extends [NVlabs/CF-3DGS](https://github.com/NVlabs/CF-3DGS) with a reproducible C3VD pipeline for COLMAP-free endoscopic reconstruction. The C3VD demo adds:
+ColonGSVO is a COLMAP-free endoscopic Gaussian-splatting system with a reproducible C3VD training and evaluation pipeline. It provides:
 
 - C3VD image/pose loading and configurable train/test splits;
 - DPT monocular-depth initialization with optional inverse depth;
@@ -10,15 +10,24 @@ This repository extends [NVlabs/CF-3DGS](https://github.com/NVlabs/CF-3DGS) with
 
 The repository intentionally excludes datasets, checkpoints, generated results, model caches, and local third-party checkouts.
 
+## Reconstruction video
+
+<video controls width="675" poster="assets/colongsvo_reconstruction_preview.png">
+  <source src="assets/colongsvo_sigmoid_t3_a_reconstruction.mp4" type="video/mp4">
+  Your browser does not support embedded MP4 playback.
+</video>
+
+[Open or download the ColonGSVO reconstruction video](assets/colongsvo_sigmoid_t3_a_reconstruction.mp4)
+
 ## Requirements
 
 The reference environment uses Ubuntu, Python 3.10, PyTorch 2.0.0, and CUDA 11.7. A CUDA-capable GPU is required for training and evaluation.
 
 ```bash
-git clone --recursive https://github.com/wuyou012/CF-3DGS-C3VD.git
-cd CF-3DGS-C3VD
+git clone --recursive https://github.com/wuyou012/ColonGSVO.git
+cd ColonGSVO
 conda env create -f environment.yml
-conda activate cf3dgs-c3vd
+conda activate colongsvo
 ```
 
 If the repository was cloned without submodules, initialize them before creating the environment:
@@ -81,7 +90,7 @@ Use `./train_c3vd_depth.sh --help` for all options. Two useful modes are:
 # Verify paths and inspect commands without using the GPU.
 ./train_c3vd_depth.sh --data-root /path/to/C3VD --dry-run
 
-# Evaluate an existing output/c3vd_inverse_depth_demo/... checkpoint.
+# Evaluate an existing output/colongsvo_demo/... checkpoint.
 ./train_c3vd_depth.sh --data-root /path/to/C3VD --eval-only
 ```
 
@@ -93,7 +102,7 @@ The evaluation produces only two report sections:
 The default output is:
 
 ```text
-output/c3vd_inverse_depth_demo/<scene>_<start>_<end>/
+output/colongsvo_demo/<scene>_<start>_<end>/
 ├── chkpnt/ep00_init.pth
 ├── train/
 └── test/
@@ -110,14 +119,14 @@ Use the same `--scene`, `--start`, `--end`, `--split`, and `--expname` values fo
 For custom experiments, the equivalent training command is:
 
 ```bash
-python run_cf3dgs.py \
+python run_colongsvo.py \
   --source /path/to/C3VD/sigmoid_t3_a \
   --mode train \
   --data_type tanks \
   --images color \
   --depth_model_type dpt \
   --use_flow_loss \
-  --expname c3vd_inverse_depth_demo \
+  --expname colongsvo_demo \
   --start_cam 0 \
   --end_cam 300 \
   --train_test_split 4 \
@@ -132,7 +141,7 @@ To evaluate an existing checkpoint with the dedicated two-section evaluator:
 ```bash
 ./evaluate_c3vd.sh \
   --source /path/to/C3VD/sigmoid_t3_a \
-  --model-path output/c3vd_inverse_depth_demo/sigmoid_t3_a_0_300/chkpnt/ep00_init.pth \
+  --model-path output/colongsvo_demo/sigmoid_t3_a_0_300/chkpnt/ep00_init.pth \
   --start 0 \
   --end 300 \
   --split 4 \
@@ -145,8 +154,8 @@ The included `sigmoid_t3_a`, frames `[0, 300)`, split-8 result contains 37 held-
 
 - Reconstruction: **PSNR 31.681, SSIM 0.853, LPIPS 0.297**.
 - Rendering FPS: **299.21**.
-- [Download the reconstruction video](assets/c3vd_sigmoid_t3_a_reconstruction.mp4).
-- [View the machine-readable report](assets/c3vd_sigmoid_t3_a_report.json).
+- [Download the reconstruction video](assets/colongsvo_sigmoid_t3_a_reconstruction.mp4).
+- [View the machine-readable report](assets/colongsvo_sigmoid_t3_a_report.json).
 
 The reported FPS measures only synchronized Gaussian rendering. Metric computation, PNG writing, and MP4 encoding are excluded.
 
@@ -158,7 +167,7 @@ The reported FPS measures only synchronized Gaussian rendering. Metric computati
 - Monocular depth remains part of training initialization, but no depth metric or depth image is produced by evaluation.
 - Pose estimates remain an internal reconstruction input, but no pose metric or pose report is produced.
 
-## Upstream project and citation
+## Related work and citation
 
 This work is derived from COLMAP-Free 3D Gaussian Splatting. Please cite the upstream paper when using the code:
 

@@ -36,7 +36,7 @@ from utils.camera_conversion import (matrix_to_quaternion,
 import pdb
 
 
-class CFGaussianModel:
+class ColonGSVOModel:
 
     def setup_functions(self):
         def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
@@ -722,7 +722,7 @@ class CFGaussianModel:
         self.denom[update_filter] += 1
 
 
-class CF3DGS_Render:
+class ColonGSVORenderer:
     def __init__(self, sh_degree=3, white_background=False,
                  radius=1, view_dependent=False):
 
@@ -731,7 +731,7 @@ class CF3DGS_Render:
         self.radius = radius
         self.view_dependent = view_dependent #true
 
-        self.gaussians = CFGaussianModel(sh_degree,
+        self.gaussians = ColonGSVOModel(sh_degree,
                                          view_dependent=self.view_dependent)
 
         self.bg_color = torch.tensor(
@@ -774,7 +774,7 @@ class CF3DGS_Render:
             self.gaussians.load_ply(input)
 
     def reset_model(self):
-        self.gaussians = CFGaussianModel(
+        self.gaussians = ColonGSVOModel(
             self.sh_degree, self.view_dependent)
 
     def render(

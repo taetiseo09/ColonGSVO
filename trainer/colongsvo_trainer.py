@@ -28,7 +28,7 @@ import open3d as o3d
 
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from gaussian_renderer import render
-from scene.gaussian_model_cf import CF3DGS_Render as GS_Render
+from scene.gaussian_model_colongsvo import ColonGSVORenderer as GS_Render
 
 from utils.graphics_utils import BasicPointCloud, focal2fov, procrustes
 from scene.cameras import Camera
@@ -63,7 +63,7 @@ def contruct_pose(poses):
     return poses
 
 
-class CFGaussianTrainer(GaussianTrainer):
+class ColonGSVOTrainer(GaussianTrainer):
     def __init__(self, data_root, model_cfg, pipe_cfg, optim_cfg):
         super().__init__(data_root, model_cfg, pipe_cfg, optim_cfg)
         self.model_cfg = model_cfg
